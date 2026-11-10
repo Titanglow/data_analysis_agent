@@ -1,12 +1,17 @@
-# 가상환경 및 파이썬 캐시 제외
+# 1. 보안 파일 (API 키 절대 업로드 금지)
+.env
+*.env
+
+# 2. 파이썬 가상환경 및 캐시 폴더
 .venv/
+venv/
 __pycache__/
 *.pyc
 
-# 보안 API 키 제외 (절대 업로드 금지)
-.env
+# 3. PyCharm 에디터 설정 폴더 제외
+.idea/
 
-# 사내 원본 데이터 및 추출 결과물 제외 (샘플만 유지)
+# 4. 사내 데이터 및 결과물 제외 (샘플 CSV만 허용)
 input_data/*
 !input_data/sample_data.csv
 output/*

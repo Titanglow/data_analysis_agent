@@ -14,7 +14,11 @@
       </list>
     </option>
   </component>
+  <component name="Git.Settings">
+    <option name="RECENT_GIT_ROOT_PATH" value="$PROJECT_DIR$" />
+  </component>
   <component name="ProjectId" id="3LrISMSp9E4zhvQluSTcbRQJhWF" />
+  <component name="ProjectLevelVcsManager" settingsEditedManually="true" />
   <component name="ProjectViewState">
     <option name="hideEmptyMiddlePackages" value="true" />
     <option name="showExcludedFiles" value="true" />
@@ -23,7 +27,7 @@
   <component name="PropertiesComponent">
     <property name="RunOnceActivity.ShowReadmeOnStart" value="true" />
     <property name="last_opened_file_path" value="$PROJECT_DIR$" />
-    <property name="settings.editor.selected.configurable" value="com.jetbrains.python.configuration.PyActiveSdkModuleConfigurable" />
+    <property name="settings.editor.selected.configurable" value="terminal" />
   </component>
   <component name="RunManager">
     <configuration name="main" type="PythonConfigurationType" factoryName="Python" temporary="true" nameIsGenerated="true">
@@ -67,14 +71,14 @@
     <servers />
   </component>
   <component name="WindowStateProjectService">
-    <state x="420" y="454" key="FileChooserDialogImpl" timestamp="1794273985977">
+    <state x="420" y="454" key="FileChooserDialogImpl" timestamp="1794277273817">
       <screen x="0" y="0" width="2560" height="1392" />
     </state>
-    <state x="420" y="454" key="FileChooserDialogImpl/0.0.2560.1392/-3840.0.2560.1392@0.0.2560.1392" timestamp="1794273985977" />
-    <state x="142" y="341" key="SettingsEditor" timestamp="1794209341913">
+    <state x="420" y="454" key="FileChooserDialogImpl/0.0.2560.1392/-3840.0.2560.1392@0.0.2560.1392" timestamp="1794277273817" />
+    <state x="232" y="297" width="1095" height="816" key="SettingsEditor" timestamp="1794277823558">
       <screen x="0" y="0" width="2560" height="1392" />
     </state>
-    <state x="142" y="341" key="SettingsEditor/0.0.2560.1392/-3840.0.2560.1392@0.0.2560.1392" timestamp="1794209341913" />
+    <state x="232" y="297" width="1095" height="816" key="SettingsEditor/0.0.2560.1392/-3840.0.2560.1392@0.0.2560.1392" timestamp="1794277823558" />
     <state x="330" y="430" width="620" height="538" key="find.popup" timestamp="1794209749382">
       <screen x="0" y="0" width="2560" height="1392" />
     </state>
