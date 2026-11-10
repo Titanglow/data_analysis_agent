@@ -18,11 +18,7 @@ MODEL_LABELS = {
 
 with st.sidebar:
     st.header("⚙️ 실행 및 비교 모델 설정")
-    run_type = st.radio(
-        "실행 방식 선택",
-        options=["단일 모델 실행", "다중 모델 동시 비교 (PoC)"],
-        index=1
-    )
+    run_type = st.radio("실행 방식 선택", options=["단일 모델 실행", "다중 모델 동시 비교 (PoC)"], index=1)
 
     if run_type == "단일 모델 실행":
         selected_models = [st.selectbox("사용할 AI 모델", options=list(MODEL_LABELS.keys()), format_func=lambda x: MODEL_LABELS[x])]
@@ -39,54 +35,83 @@ uploaded_file = st.file_uploader("📂 사내 데이터 파일(CSV, Excel) 업�
 if uploaded_file is not None:
     raw_df = load_and_sync_to_db(uploaded_file)
 
-    # 1. 키워드 조합 검색 및 SQL DB 필터링
-    st.subheader("1️⃣ 키워드 조합 검색 & 자동 구축된 SQL DB 조회")
-    tab_kw, tab_sql = st.tabs(["🔍 키워드 조합 검색 (데이터 수집/필터)", "🗄️ SQLite DB 직접 쿼리 & 파일 추출"])
+    # 1. 자연어 SQL 자동 생성 및 키워드 검색 영역
+    st.subheader("1️⃣ 자연어 기반 데이터 수집 및 SQLite DB 조회")
+    tab_nl, tab_kw, tab_sql = st.tabs(["🤖 자연어 쿼리 자동 생성 (추천)", "🔍 키워드 조합 필터", "🗄️ 수동 SQL 쿼리"])
+
+    with tab_nl:
+        st.caption("코딩이나 SQL을 몰라도 질문을 적으면 테이블(`internal_data`)을 조회하는 SQL이 자동으로 만들어집니다.")
+        nl_question = st.text_input("원하는 데이터 조건을 자연어로 적어주세요 (예: 'B라인 데이터만 보여줘' 또는 '불량수가 20이 넘는 행 찾아줘'):", value="B라인 생산 데이터 조회해줘")
+
+        # 간단한 자연어 -> SQL 변환 규칙 엔진 (에이전트 연동 전 스마트 룰 기반)
+        auto_sql = f"SELECT * FROM {TABLE_NAME}"
+        if nl_question:
+            cols = list(raw_df.columns)
+            # 키워드 매칭을 통한 자동 WHERE절 생성
+            conditions = []
+            for col in cols:
+                for word in nl_question.replace("'", "").split():
+                    if word in raw_df[col].astype(str).values or any(raw_df[col].astype(str).str.contains(word, case=False, na=False)):
+                        conditions.append(f"{col} LIKE '%{word}%'")
+            if conditions:
+                auto_sql += " WHERE " + " OR ".join(conditions[:2])
+        auto_sql += " LIMIT 20;"
+
+        st.code(auto_sql, language="sql")
+        if st.button("자동 생성된 SQL 실행"):
+            try:
+                nl_df = run_sql_query(auto_sql)
+                st.success(f"총 {len(nl_df)}건 조회됨")
+                st.dataframe(nl_df, use_container_width=True)
+                df = nl_df  # 분석 대상 데이터로 반영
+            except Exception as e:
+                st.error(f"실행 오류: {e}")
+                df = raw_df
+        else:
+            df = raw_df
 
     with tab_kw:
         c1, c2 = st.columns([3, 1])
-        kw_input = c1.text_input("검색 키워드 입력 (쉼표 `,`로 조합 가능, 예: `B라인, W44`)", value="")
-        match_type = c2.radio("조합 조건", options=["OR (하나라도 포함)", "AND (모두 포함)"], horizontal=True)
-        df = filter_by_keywords(raw_df, kw_input, match_all=(match_type.startswith("AND")))
-        st.caption(f"전체 {len(raw_df)}건 중 **{len(df)}건** 필터링됨")
+        kw_input = c1.text_input("검색 키워드 입력 (쉼표 `,`로 조합, 예: `B라인, W44`)", value="")
+        match_type = c2.radio("조건", options=["OR", "AND"], horizontal=True)
+        df = filter_by_keywords(raw_df, kw_input, match_all=(match_type == "AND"))
         st.dataframe(df, use_container_width=True)
 
     with tab_sql:
-        default_sql = f"SELECT * FROM {TABLE_NAME} LIMIT 10;"
-        sql_input = st.text_area("SQL 쿼리 입력 (테이블명: `internal_data`)", value=default_sql, height=80)
-        if st.button("SQL 실행"):
+        sql_input = st.text_area("수동 SQL 쿼리 입력", value=f"SELECT * FROM {TABLE_NAME} LIMIT 10;", height=70)
+        if st.button("수동 SQL 실행"):
             try:
                 st.dataframe(run_sql_query(sql_input), use_container_width=True)
             except Exception as e:
-                st.error(f"SQL 오류: {e}")
+                st.error(f"오류: {e}")
         if DB_PATH.exists():
             with open(DB_PATH, "rb") as f:
-                st.download_button("💾 자동 생성된 SQLite DB 파일(.db) 다운로드", data=f, file_name="internal_analysis.db")
+                st.download_button("💾 SQLite DB 파일(.db) 다운로드", data=f, file_name="internal_analysis.db")
 
     summary_df = df.describe(include="all").fillna("")
     st.divider()
 
     # 2. 시각화 차트
-    st.subheader("2️⃣ 필터링 데이터 시각화 차트")
+    st.subheader("2️⃣ 데이터 시각화 차트")
     num_cols = df.select_dtypes(include=["number"]).columns.tolist()
     all_cols = df.columns.tolist()
     if len(num_cols) > 0 and len(df) > 0:
         c1, c2, c3 = st.columns(3)
-        x_col = c1.selectbox("X축 (기준)", options=all_cols, index=0)
-        y_col = c2.selectbox("Y축 (수치)", options=num_cols, index=0)
-        chart_type = c3.selectbox("차트 형태", options=["막대 차트 (Bar)", "선 차트 (Line)", "산점도 (Scatter)"])
+        x_col = c1.selectbox("X축", options=all_cols, index=0)
+        y_col = c2.selectbox("Y축", options=num_cols, index=0)
+        chart_type = c3.selectbox("차트 종류", options=["막대 차트 (Bar)", "선 차트 (Line)", "산점도 (Scatter)"])
         fig = px.bar(df, x=x_col, y=y_col) if "막대" in chart_type else (px.line(df, x=x_col, y=y_col) if "선" in chart_type else px.scatter(df, x=x_col, y=y_col))
         st.plotly_chart(fig, use_container_width=True)
 
     st.divider()
 
-    # 3. 자연어 분석 및 모델 비교 실행
-    st.subheader("3️⃣ 자연어 질문 및 AI 에이전트 분석 (Ollama vs ChatGPT vs Gemini)")
-    question = st.text_input("💡 질문 입력:", value="현재 데이터의 핵심 추세, 이상 항목, 원인 가설 및 조치 제안을 정리해 줘.")
+    # 3. 다중 AI 모델 동시 비교 분석
+    st.subheader("3️⃣ 자연어 질문 및 AI 에이전트 다중 비교 분석")
+    question = st.text_input("💡 에이전트 분석 질문:", value="현재 데이터의 핵심 추세, 이상 항목, 원인 가설 및 조치 제안을 정리해 줘.")
 
-    if st.button("🚀 에이전트 분석 실행", type="primary"):
+    if st.button("🚀 에이전트 분석 실행 (모두 비교)", type="primary"):
         if not selected_models:
-            st.warning("좌측 사이드바에서 최소 1개 이상의 모델을 선택해 주세요.")
+            st.warning("좌측 사이드바에서 최소 1개 이상의 모델을 선택해주세요.")
         else:
             agent_app = build_agent_graph()
             data_info = f"데이터 건수: {len(df)}건\n컬럼: {list(df.columns)}\n통계 요약:\n{df.describe(include='all').to_string()}"
