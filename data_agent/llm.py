@@ -4,6 +4,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+
 class MockLLM:
     def invoke(self, prompt: str) -> str:
         time.sleep(0.4)
@@ -14,8 +15,14 @@ class MockLLM:
             "- **조치 제안:** 해당 구간의 원인을 점검하고 모니터링을 강화하세요."
         )
 
+
 def call_llm(prompt: str, mode: str = "mock") -> tuple[str, float]:
     start_time = time.time()
+
+    # 환경변수 명시적 로드 재확인
+    openai_key = os.getenv("OPENAI_API_KEY")
+    google_key = os.getenv("GOOGLE_API_KEY")
+
     try:
         if mode == "mock":
             llm = MockLLM()
@@ -28,13 +35,16 @@ def call_llm(prompt: str, mode: str = "mock") -> tuple[str, float]:
             result = llm.invoke(prompt).content
 
         elif mode == "cloud_gemini":
+            if not google_key:
+                raise ValueError("GOOGLE_API_KEY가 설정되지 않았습니다. .env 파일을 확인해주세요.")
             from langchain_google_genai import ChatGoogleGenerativeAI
-            gemini_models = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash", "gemini-3-flash-preview"]
+            # 가장 안정적인 최신 공식 모델명 우선 적용
+            gemini_models = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"]
             last_err = None
             result = None
             for m_name in gemini_models:
                 try:
-                    llm = ChatGoogleGenerativeAI(model=m_name, temperature=0.0)
+                    llm = ChatGoogleGenerativeAI(model=m_name, google_api_key=google_key, temperature=0.0)
                     resp = llm.invoke(prompt)
                     result = str(resp.content) if not isinstance(resp.content, list) else "\n".join(str(x) for x in resp.content)
                     break
@@ -45,9 +55,11 @@ def call_llm(prompt: str, mode: str = "mock") -> tuple[str, float]:
                 raise last_err
 
         elif mode == "cloud_openai":
+            if not openai_key:
+                raise ValueError("OPENAI_API_KEY가 설정되지 않았습니다. .env 파일을 확인해주세요.")
             from langchain_openai import ChatOpenAI
             model_name = os.getenv("OPENAI_MODEL_NAME", "gpt-4o-mini")
-            llm = ChatOpenAI(model=model_name, temperature=0.0)
+            llm = ChatOpenAI(model=model_name, api_key=openai_key, temperature=0.0)
             result = llm.invoke(prompt).content
 
         else:
@@ -55,7 +67,7 @@ def call_llm(prompt: str, mode: str = "mock") -> tuple[str, float]:
 
     except Exception as e:
         elapsed = round(time.time() - start_time, 2)
-        return f"⚠️ **[{mode}] 연결 에러:**\n`{str(e)}`\n\n*(API 키 또는 네트워크 상태를 확인해주세요)*", elapsed
+        return f"⚠️ **[{mode}] 연결 에러:**\n`{str(e)}`\n\n*(API 키가 올바르지 않거나 네트워크 연결을 확인해주세요)*", elapsed
 
     elapsed = round(time.time() - start_time, 2)
     return result, elapsed
