@@ -49,13 +49,12 @@ if uploaded_file is not None:
         if nl_question:
             q_lower = nl_question.lower()
             for col in raw_df.columns:
-                # 컬럼명이나 특정 키워드가 포함된 경우 LIKE 조건 생성
-                if any(w in q_lower for w in [col.lower(), "라인", "주차", "상태", "부서"]):
-                    for val in raw_df[col].dropna().astype(str).unique():
-                        if val.lower() in q_lower:
-                            conditions.append(f"{col} LIKE '%{val}%'")
+                unique_vals = raw_df[col].dropna().astype(str).unique()
+                for val in unique_vals:
+                    if val.lower() in q_lower:
+                        conditions.append(f"{col} LIKE '%{val}%'")
 
-                # 숫자 비교 조건 (초과, 이상, 미만, 이하) 감지
+                # 숫자 비교 조건 감지
                 if pd.api.types.is_numeric_dtype(raw_df[col]):
                     import re
 
@@ -68,13 +67,7 @@ if uploaded_file is not None:
                             conditions.append(f"{col} < {num_val}")
 
             if conditions:
-                auto_sql += " WHERE " + " AND ".join(conditions[:2])
-            elif "라인" in q_lower:
-                # 일반적인 라인 검색 폴백
-                for col in raw_df.columns:
-                    if "라인" in col.lower() or "line" in col.lower():
-                        auto_sql += f" WHERE {col} LIKE '%라인%'"
-                        break
+                auto_sql += " WHERE " + " AND ".join(list(set(conditions))[:2])
 
         auto_sql += " LIMIT 20;"
 

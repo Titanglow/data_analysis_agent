@@ -2,7 +2,7 @@ import os
 import time
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(override=True)  # 환경변수 강제 갱신
 
 
 class MockLLM:
@@ -19,7 +19,6 @@ class MockLLM:
 def call_llm(prompt: str, mode: str = "mock") -> tuple[str, float]:
     start_time = time.time()
 
-    # 환경변수 명시적 로드 재확인
     openai_key = os.getenv("OPENAI_API_KEY")
     google_key = os.getenv("GOOGLE_API_KEY")
 
@@ -38,8 +37,8 @@ def call_llm(prompt: str, mode: str = "mock") -> tuple[str, float]:
             if not google_key:
                 raise ValueError("GOOGLE_API_KEY가 설정되지 않았습니다. .env 파일을 확인해주세요.")
             from langchain_google_genai import ChatGoogleGenerativeAI
-            # 가장 안정적인 최신 공식 모델명 우선 적용
-            gemini_models = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"]
+            # AQ 계정 및 표준 API와 호환되는 가장 안정적인 모델 리스트
+            gemini_models = ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-2.0-flash"]
             last_err = None
             result = None
             for m_name in gemini_models:
