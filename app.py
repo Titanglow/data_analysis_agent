@@ -35,37 +35,58 @@ uploaded_file = st.file_uploader("📂 사내 데이터 파일(CSV, Excel) 업�
 if uploaded_file is not None:
     raw_df = load_and_sync_to_db(uploaded_file)
 
-    # 1. 자연어 SQL 자동 생성 및 키워드 검색 영역
+    # 1. 자연어 쿼리 자동 생성 및 키워드 검색 영역
     st.subheader("1️⃣ 자연어 기반 데이터 수집 및 SQLite DB 조회")
     tab_nl, tab_kw, tab_sql = st.tabs(["🤖 자연어 쿼리 자동 생성 (추천)", "🔍 키워드 조합 필터", "🗄️ 수동 SQL 쿼리"])
 
     with tab_nl:
-        st.caption("코딩이나 SQL을 몰라도 질문을 적으면 테이블(`internal_data`)을 조회하는 SQL이 자동으로 만들어집니다.")
-        nl_question = st.text_input("원하는 데이터 조건을 자연어로 적어주세요 (예: 'B라인 데이터만 보여줘' 또는 '불량수가 20이 넘는 행 찾아줘'):", value="B라인 생산 데이터 조회해줘")
+        st.caption("질문을 입력하면 테이블(`internal_data`)을 조회하는 SQL이 자동으로 생성됩니다. (예: 'A라인 조회해줘', '불량수 20이 넘는 행 찾아줘')")
+        nl_question = st.text_input("조회하고 싶은 조건을 자연어로 입력하세요:", value="A라인 데이터 조회해줘")
 
-        # 간단한 자연어 -> SQL 변환 규칙 엔진 (에이전트 연동 전 스마트 룰 기반)
+        # 고도화된 자연어 -> SQL 변환 규칙 엔진
         auto_sql = f"SELECT * FROM {TABLE_NAME}"
+        conditions = []
         if nl_question:
-            cols = list(raw_df.columns)
-            # 키워드 매칭을 통한 자동 WHERE절 생성
-            conditions = []
-            for col in cols:
-                for word in nl_question.replace("'", "").split():
-                    if word in raw_df[col].astype(str).values or any(raw_df[col].astype(str).str.contains(word, case=False, na=False)):
-                        conditions.append(f"{col} LIKE '%{word}%'")
+            q_lower = nl_question.lower()
+            for col in raw_df.columns:
+                # 컬럼명이나 특정 키워드가 포함된 경우 LIKE 조건 생성
+                if any(w in q_lower for w in [col.lower(), "라인", "주차", "상태", "부서"]):
+                    for val in raw_df[col].dropna().astype(str).unique():
+                        if val.lower() in q_lower:
+                            conditions.append(f"{col} LIKE '%{val}%'")
+
+                # 숫자 비교 조건 (초과, 이상, 미만, 이하) 감지
+                if pd.api.types.is_numeric_dtype(raw_df[col]):
+                    import re
+
+                    nums = re.findall(r'\d+', nl_question)
+                    if nums:
+                        num_val = nums[0]
+                        if "넘" in nl_question or "이상" in nl_question or "초과" in nl_question:
+                            conditions.append(f"{col} > {num_val}")
+                        elif "이하" in nl_question or "미만" in nl_question or "이내" in nl_question:
+                            conditions.append(f"{col} < {num_val}")
+
             if conditions:
-                auto_sql += " WHERE " + " OR ".join(conditions[:2])
+                auto_sql += " WHERE " + " AND ".join(conditions[:2])
+            elif "라인" in q_lower:
+                # 일반적인 라인 검색 폴백
+                for col in raw_df.columns:
+                    if "라인" in col.lower() or "line" in col.lower():
+                        auto_sql += f" WHERE {col} LIKE '%라인%'"
+                        break
+
         auto_sql += " LIMIT 20;"
 
         st.code(auto_sql, language="sql")
-        if st.button("자동 생성된 SQL 실행"):
+        if st.button("자동 생성된 SQL 실행 및 데이터 반영"):
             try:
                 nl_df = run_sql_query(auto_sql)
                 st.success(f"총 {len(nl_df)}건 조회됨")
                 st.dataframe(nl_df, use_container_width=True)
-                df = nl_df  # 분석 대상 데이터로 반영
+                df = nl_df
             except Exception as e:
-                st.error(f"실행 오류: {e}")
+                st.error(f"실행 오류: {e} (기본 전체 데이터를 대상으로 진행합니다)")
                 df = raw_df
         else:
             df = raw_df
