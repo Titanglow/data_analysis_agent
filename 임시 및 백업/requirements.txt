@@ -1,0 +1,18 @@
+# LLM & LangGraph 코어
+langchain>=0.3.0
+langchain-core>=0.3.0
+langchain-community>=0.3.0
+langgraph>=0.2.0
+
+# 로컬 LLM (Ollama) & 비교용 외부 API 연동
+langchain-ollama>=0.2.0
+langchain-openai>=0.2.0
+langchain-google-genai>=2.0.0
+
+# 데이터 분석, 시각화, 엑셀 추출 및 웹 UI
+streamlit>=1.39.0
+pandas>=2.2.0
+plotly>=5.24.0
+openpyxl>=3.1.5
+python-dotenv>=1.0.1
+pydantic>=2.9.0

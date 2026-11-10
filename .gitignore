@@ -1,0 +1,12 @@
+# 가상환경 및 파이썬 캐시 제외
+.venv/
+__pycache__/
+*.pyc
+
+# 보안 API 키 제외 (절대 업로드 금지)
+.env
+
+# 사내 원본 데이터 및 추출 결과물 제외 (샘플만 유지)
+input_data/*
+!input_data/sample_data.csv
+output/*
