@@ -26,7 +26,7 @@ def get_installed_ollama_models() -> list[str]:
 
 
 def _fallback_report(mode_label: str, reason: str) -> str:
-    """API 한도 초과 또는 미설치 모델 선택 시 화면 유지용 백업 리포트"""
+    """API 한도 초과 또는 오류 시 화면 유지용 백업 리포트"""
     return (
         f"> 💡 **[알림] {mode_label} 호출 안내**\n"
         f"> - **사유:** `{reason}`\n"
@@ -64,47 +64,68 @@ def call_llm(prompt: str, mode: str = "mock") -> tuple[str, float]:
         # 2. 로컬 Ollama (정밀 모드 & 빠른 모드 공통 지원)
         elif mode in ("local_ollama", "local_ollama_fast"):
             from langchain_ollama import ChatOllama
-            # 빠른 모드는 토큰 생성 상한(num_predict)을 조절해 응답 속도를 대폭 단축
             num_predict = 650 if mode == "local_ollama_fast" else 1200
             llm = ChatOllama(model=local_model, temperature=0.0, num_predict=num_predict)
             resp = llm.invoke(prompt)
             tag = "⚡초고속 1단계" if mode == "local_ollama_fast" else "🔒정밀 2단계"
             result = f"*(로컬 모델: `{local_model}` | {tag})*\n\n" + str(resp.content)
 
-        # 3. Cloud: Groq (초고속 무료 API - OpenAI 호환 엔드포인트)
+        # 3. Cloud: Groq (실시간 활성 모델 자동 탐색 + 표준 OpenAI 클라이언트 직접 호출)
         elif mode == "cloud_groq":
             if not groq_key:
                 raise ValueError(".env 파일에 GROQ_API_KEY가 설정되지 않았습니다.")
 
-            from langchain_openai import ChatOpenAI
-            # Groq 무료 티어 주력 고성능 모델 및 경량 고속 모델 자동 폴백
-            groq_models = [
-                os.getenv("GROQ_MODEL_NAME", "llama-3.3-70b-versatile"),
+            from openai import OpenAI
+            client = OpenAI(base_url="https://api.groq.com/openai/v1", api_key=groq_key)
+
+            # Step A: Groq 서버에서 현재 지원 중인 활성 모델 목록을 실시간 조회
+            active_models = []
+            skip_keywords = ["whisper", "tts", "guard", "safeguard", "embed", "playai", "orpheus", "allam"]
+            try:
+                model_list = client.models.list()
+                for m in model_list.data:
+                    m_id = getattr(m, "id", "")
+                    if m_id and not any(k in m_id.lower() for k in skip_keywords):
+                        active_models.append(m_id)
+            except Exception:
+                pass
+
+            # 우선순위 모델 (Llama / Qwen / DeepSeek 계열 우선 배치 후 활성 모델 전체 순회)
+            preferred = [
+                "llama-3.3-70b-versatile",
                 "llama-3.1-8b-instant",
-                "qwen-qwq-32b",
-                "gemma2-9b-it",
+                "llama3-70b-8192",
+                "llama3-8b-8192",
             ]
-            # 분당 토큰 제한(TPM) 방어를 위해 프롬프트 길이 안전 제한
+            # 서버 활성 목록에 있는 우선 모델을 먼저 넣고, 나머지 활성 모델들을 뒤에 추가
+            if active_models:
+                test_order = [m for m in preferred if m in active_models] + [
+                    m for m in active_models if m not in preferred
+                ]
+            else:
+                test_order = preferred
+
             safe_prompt = prompt[:6000]
             result = None
-            last_err = None
-            for m_name in groq_models:
+            errors = []
+
+            for m_name in test_order:
                 try:
-                    llm = ChatOpenAI(
-                        base_url="https://api.groq.com/openai/v1",
-                        api_key=groq_key,
+                    resp = client.chat.completions.create(
                         model=m_name,
+                        messages=[{"role": "user", "content": safe_prompt}],
                         temperature=0.0,
-                        max_tokens=1200,
                     )
-                    resp = llm.invoke(safe_prompt)
-                    result = f"*(연결 모델: `Groq / {m_name}`)*\n\n" + str(resp.content)
-                    break
+                    content = resp.choices[0].message.content
+                    if content:
+                        result = f"*(연결 모델: `Groq / {m_name}`)*\n\n" + content
+                        break
                 except Exception as e:
-                    last_err = e
+                    errors.append(f"{m_name}: {str(e)[:60]}")
                     continue
+
             if result is None:
-                raise last_err
+                raise RuntimeError(" | ".join(errors[:2]) if errors else "사용 가능한 Groq 모델을 찾지 못했습니다.")
 
         # 4. Cloud: Google Gemini (모델 자동 탐색)
         elif mode == "cloud_gemini":
@@ -152,7 +173,7 @@ def call_llm(prompt: str, mode: str = "mock") -> tuple[str, float]:
 
     except Exception as e:
         elapsed = round(time.time() - start_time, 2)
-        return _fallback_report(mode, str(e)[:140]), elapsed
+        return _fallback_report(mode, str(e)[:160]), elapsed
 
     elapsed = round(time.time() - start_time, 2)
     return result, elapsed
