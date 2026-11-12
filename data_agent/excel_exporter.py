@@ -1,19 +1,128 @@
 import io
 import math
 import re
+from collections import Counter
 import pandas as pd
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.chart import BarChart, Reference
 
 
+# 제목/문장 클러스터링 시 제외할 일반 동사·조사·형용사 불용어
+TOPIC_STOPWORDS = {
+    "조회", "확인", "이동", "검증", "테스트", "기능", "동작", "표시", "출력", "입력",
+    "선택", "클릭", "버튼", "화면", "상태", "경우", "정상", "여부", "시나리오", "항목",
+    "있음", "없음", "한다", "된다", "이다", "에서", "으로", "에게", "대한", "통해",
+    "후", "전", "시", "및", "등", "수", "값", "창", "란", "키", "키로", "다른", "이전",
+}
+
+
+def cluster_text_series_by_topic(series: pd.Series, max_groups: int = 8) -> pd.DataFrame:
+    """
+    'Title'처럼 각 행이 1건씩 모두 다른 문장일 때,
+    공통으로 반복 등장하는 핵심 키워드(예: '문서', '목차', '검색', '대문', '배달', '쿠폰')를 자동 추출하여
+    의미 있는 주제 그룹으로 묶고 건수·비중(%)·포함 항목 예시를 반환합니다.
+    """
+    clean_vals = [
+        re.sub(r"\s*\[[^\]]+\]", "", str(v)).strip()
+        for v in series.dropna()
+        if str(v).strip() not in ("-", "", "None", "nan")
+    ]
+    total = len(clean_vals)
+    if total == 0:
+        return pd.DataFrame()
+
+    vc = pd.Series(clean_vals).value_counts()
+    if len(vc) <= max_groups and vc.iloc[0] > 1:
+        rows = []
+        for k, cnt in vc.items():
+            rows.append({
+                "주제/분류 그룹": str(k),
+                "건수": int(cnt),
+                "비중(%)": round(cnt / total * 100, 1),
+                "표시라벨": f"{cnt}건 ({cnt / total * 100:.1f}%)",
+                "포함된 상세 항목": str(k),
+            })
+        return pd.DataFrame(rows)
+
+    tokenized_list = []
+    word_counter = Counter()
+    for text in clean_vals:
+        words = re.findall(r"[가-힣A-Za-z0-9]{2,}", text)
+        filtered = []
+        for w in words:
+            w_stem = re.sub(r"(으로|에서|에게|부터|까지|이라|란|로|은|는|이|가|을|를|의|와|과|만|도)$", "", w)
+            if len(w_stem) >= 2 and w_stem.lower() not in TOPIC_STOPWORDS:
+                filtered.append(w_stem)
+        unique_in_row = list(dict.fromkeys(filtered))
+        tokenized_list.append((text, unique_in_row))
+        for uw in unique_in_row:
+            word_counter[uw] += 1
+
+    # 2회 이상 등장한 핵심 키워드를 빈도순으로 선정
+    repeated_keywords = [w for w, c in word_counter.most_common(15) if c >= 2]
+
+    grouped_items: dict[str, list[str]] = {}
+    for text, tokens in tokenized_list:
+        assigned_kw = None
+        for kw in repeated_keywords:
+            if kw in tokens or kw in text:
+                assigned_kw = f"📁 [{kw}] 관련 항목"
+                break
+        if assigned_kw is None:
+            first_word = tokens[0] if tokens else text[:10]
+            assigned_kw = f"📌 기타 ({first_word} 등)" if len(repeated_keywords) >= 2 else f"📄 {text[:18]}"
+        grouped_items.setdefault(assigned_kw, []).append(text)
+
+    sorted_groups = sorted(grouped_items.items(), key=lambda x: len(x[1]), reverse=True)
+    final_rows = []
+    etc_items = []
+
+    for idx, (g_name, items) in enumerate(sorted_groups):
+        if idx < max_groups - 1 or len(sorted_groups) <= max_groups:
+            cnt = len(items)
+            sample_preview = ", ".join(items[:4]) + (f" 외 {cnt - 4}건" if cnt > 4 else "")
+            final_rows.append({
+                "주제/분류 그룹": g_name,
+                "건수": cnt,
+                "비중(%)": round(cnt / total * 100, 1),
+                "표시라벨": f"{cnt}건 ({cnt / total * 100:.1f}%)",
+                "포함된 상세 항목": sample_preview,
+            })
+        else:
+            etc_items.extend(items)
+
+    if etc_items:
+        cnt = len(etc_items)
+        sample_preview = ", ".join(etc_items[:4]) + (f" 외 {cnt - 4}건" if cnt > 4 else "")
+        final_rows.append({
+            "주제/분류 그룹": "📌 기타 단건 시나리오 묶음",
+            "건수": cnt,
+            "비중(%)": round(cnt / total * 100, 1),
+            "표시라벨": f"{cnt}건 ({cnt / total * 100:.1f}%)",
+            "포함된 상세 항목": sample_preview,
+        })
+
+    return pd.DataFrame(final_rows)
+
+
+def shorten_long_label(text: str, max_len: int = 24) -> str:
+    """Precondition이나 Expected Result처럼 긴 문장을 차트 축에 표시할 때 핵심만 남기고 깔끔하게 축약합니다."""
+    s = re.sub(r"\s*\[[^\]]+\]", "", str(text)).strip()
+    s = re.sub(r"https?://[^\s/]+(?:/wiki/)?", "", s).strip()
+    s = re.sub(r"^PC 브라우저에서\s*", "", s).strip()
+    if len(s) <= max_len:
+        return s
+    return s[:max_len].rstrip() + "…"
+
+
 def analyze_color_cell_contexts(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    셀 배경색(🎨빨강강조 등)이 칠해진 셀이 '어느 컬럼(열)'의 '무슨 값'인지 분석하여,
-    무조건 불합격(FAIL)으로 오해하지 않고 컬럼 문맥에 맞는 실제 의미를 자동 판별합니다.
-    """
+    """셀 배경색(🎨빨강강조 등)이 칠해진 셀의 컬럼 위치와 실제 의미를 분석합니다."""
     rows = []
-    id_col = next((c for c in df.columns if c.upper() in ("ID", "TC ID", "TC_ID", "번호", "라인", "설비번호")), df.columns[0])
+    if len(df) == 0:
+        return pd.DataFrame()
+
+    id_col = next((c for c in df.columns if c.upper() in ("ID", "TC ID", "TC_ID", "TC-ID", "번호", "라인", "설비번호")), df.columns[0])
     status_col = next(
         (c for c in df.columns if any(k in c.lower() for k in ["execution", "actual", "status", "result", "결과", "판정", "상태"])),
         None,
@@ -43,17 +152,14 @@ def analyze_color_cell_contexts(df: pd.DataFrame) -> pd.DataFrame:
                     else:
                         meaning = f"실행 결과({clean_val}) 상태 강조"
                 else:
-                    if "not run" in row_status.lower():
-                        meaning = f"[{col}] 항목 강조 표시 (현재 실행 상태는 Not Run 미실행)"
-                    else:
-                        meaning = f"[{col}] 항목 시각적 강조 표시"
+                    meaning = f"[{col}] 항목 시각적 강조 표시"
 
                 rows.append({
                     "식별 ID / 구분": row_id,
                     "색상 표시된 컬럼(열)": col,
-                    "셀 실제 내용": clean_val,
+                    "셀 실제 내용": clean_val[:40],
                     "감지된 색상": color_tag,
-                    "현재 실행/판정 상태": row_status,
+                    "현재 실행/판정 상태": row_status[:30],
                     "자동 문맥 해석 (실제 의미)": meaning,
                 })
 
@@ -89,12 +195,7 @@ def summarize_aux_sheets(aux_sheets: dict[str, pd.DataFrame] | None) -> pd.DataF
 
 
 def build_korean_stat_tables(df: pd.DataFrame, aux_sheets: dict[str, pd.DataFrame] | None = None) -> dict[str, pd.DataFrame]:
-    """
-    1) 보조 시트(Summary·Environment) 통합 요약,
-    2) 실제 판정/실행 상태(Pass / Fail / Not Run) 집계,
-    3) 색상 강조 셀의 컬럼별·내용별 실제 의미 분석,
-    4) 주요 도메인 분류(중요도·기법·라인·불량유형)별 핵심 집계표를 생성합니다.
-    """
+    """어떤 구조의 파일이든 의미 있는 한글 통계표(보조시트 요약, 주제 그룹핑 집계, 사전조건 분포, 판정/색상 문맥 등)를 생성합니다."""
     tables = {}
     if len(df) == 0:
         return tables
@@ -103,48 +204,22 @@ def build_korean_stat_tables(df: pd.DataFrame, aux_sheets: dict[str, pd.DataFram
     num_cols = df.select_dtypes(include=["number"]).columns.tolist()
     total_cnt = len(df)
 
-    # 1. 다른 시트(Summary, Environment 등) 통합 요약표
     aux_df = summarize_aux_sheets(aux_sheets)
     if len(aux_df) > 0:
         tables["1. 보조 시트(Summary · Environment 등) 핵심 내용 통합 요약"] = aux_df
 
-    # 2. 실행/판정 상태(Execution Status / Actual Result / Pass·Fail) 정밀 집계표
-    status_cols = [
-        c for c in all_cols
-        if any(k in c.lower() for k in ["execution status", "status", "actual result", "판정", "결과", "상태"])
-    ]
-    if status_cols:
-        st_rows = []
-        for s_col in status_cols[:2]:
-            clean_series = df[s_col].astype(str).apply(lambda x: re.sub(r"\s*\[[^\]]+\]", "", x).strip())
-            vc = clean_series.value_counts()
-            for val_name, cnt in vc.items():
-                share = (cnt / total_cnt * 100) if total_cnt > 0 else 0.0
-                val_low = val_name.lower()
-                if "pass" in val_low or "합격" in val_low or "정상" in val_low:
-                    interp = "✅ 정상 통과 (PASS)"
-                elif "fail" in val_low or "ng" in val_low or "불합격" in val_low:
-                    interp = "🚨 실행 실패 (실제 결함/FAIL)"
-                elif "not run" in val_low or "미실행" in val_low or val_name in ("-", "", "(빈칸)"):
-                    interp = "⏳ 미실행 / 결과 미기재 (실제 실패가 아닌 테스트 수행 전 상태)"
-                else:
-                    interp = "📌 기타 상태"
-                st_rows.append({
-                    "판정/상태 기준 열": s_col,
-                    "상태 값": val_name if val_name != "-" else "(미기재/빈칸)",
-                    "건수(건)": int(cnt),
-                    "비중(%)": f"{share:.1f}%",
-                    "실무 의미 해석": interp,
-                })
-        if st_rows:
-            tables[f"{len(tables) + 1}. 실행 및 판정 상태(Pass / Fail / Not Run) 정밀 집계"] = pd.DataFrame(st_rows)
+    title_col = next((c for c in all_cols if any(k in c.lower() for k in ["title", "제목", "타이틀", "시나리오", "기능명", "항목명"])), None)
+    if title_col:
+        topic_df = cluster_text_series_by_topic(df[title_col], max_groups=10)
+        if len(topic_df) > 0:
+            tables[f"{len(tables) + 1}. [{title_col}] 유사 주제(키워드)별 자동 그룹핑 집계"] = topic_df[
+                ["주제/분류 그룹", "건수", "비중(%)", "포함된 상세 항목"]
+            ]
 
-    # 3. 셀 배경색(🎨빨강강조 등) 컬럼별·내용별 실제 문맥 의미 분석표
     color_ctx_df = analyze_color_cell_contexts(df)
     if len(color_ctx_df) > 0:
         tables[f"{len(tables) + 1}. 셀 배경색(강조 표시) 위치 및 문맥별 실제 의미 분석"] = color_ctx_df
 
-    # 4. 제조/생산 데이터 전용: 라인별 & 불량유형별 집계
     line_col = "라인" if "라인" in all_cols else ("생산라인" if "생산라인" in all_cols else None)
     if line_col and "생산량" in all_cols and "불량수" in all_cols:
         line_rows = []
@@ -174,32 +249,32 @@ def build_korean_stat_tables(df: pd.DataFrame, aux_sheets: dict[str, pd.DataFram
         if line_rows:
             tables[f"{len(tables) + 1}. 라인별 생산·품질 및 주요 불량 종합 집계"] = pd.DataFrame(line_rows)
 
-    # 5. 중요도(Priority/Severity) · 카테고리 · 테스트기법 등 핵심 분류별 집계
-    meaningful_cats = [
+    cat_candidates = [
         c for c in all_cols
-        if any(k in c.lower() for k in ["category", "priority", "severity", "technique", "type", "domain", "app", "불량유형", "시간대", "부서", "분류"])
+        if any(k in c.lower() for k in ["category", "priority", "severity", "precondition", "status", "actual", "불량유형", "시간대", "분류"])
+        and c != title_col
     ]
-    if not meaningful_cats:
-        meaningful_cats = [c for c in all_cols if 1 < df[c].nunique() <= 20 and c not in status_cols][:2]
-
-    for c_col in meaningful_cats[:3]:
+    for c_col in cat_candidates[:3]:
         clean_s = df[c_col].astype(str).apply(lambda x: re.sub(r"\s*\[[^\]]+\]", "", x).strip())
-        vc = clean_s.value_counts()
-        c_rows = []
-        for val_name, cnt in vc.head(15).items():
-            share = (cnt / total_cnt * 100) if total_cnt > 0 else 0.0
-            raw_sub = df[clean_s == val_name][c_col].astype(str)
-            color_in_col = int(raw_sub.str.contains("🎨", regex=False).sum())
-            c_rows.append({
-                f"[{c_col}] 분류 항목": val_name,
-                "건수(건)": int(cnt),
-                "비중(%)": f"{share:.1f}%",
-                "해당 열 색상강조(건)": color_in_col,
-            })
-        if c_rows:
-            tables[f"{len(tables) + 1}. [{c_col}] 분류별 분포 및 비중 집계"] = pd.DataFrame(c_rows)
+        if clean_s.nunique() > 12 and len(df) >= 10:
+            grp_df = cluster_text_series_by_topic(clean_s, max_groups=8)
+            if len(grp_df) > 0:
+                tables[f"{len(tables) + 1}. [{c_col}] 유형별 요약 집계"] = grp_df[
+                    ["주제/분류 그룹", "건수", "비중(%)", "포함된 상세 항목"]
+                ]
+        else:
+            vc = clean_s.value_counts()
+            c_rows = []
+            for val_name, cnt in vc.head(12).items():
+                share = (cnt / total_cnt * 100) if total_cnt > 0 else 0.0
+                c_rows.append({
+                    f"[{c_col}] 구분": val_name,
+                    "건수(건)": int(cnt),
+                    "비중(%)": f"{share:.1f}%",
+                })
+            if c_rows:
+                tables[f"{len(tables) + 1}. [{c_col}] 항목별 분포 및 비중 집계"] = pd.DataFrame(c_rows)
 
-    # 6. 수치형 항목이 있을 경우 기초통계 요약 추가
     if num_cols:
         stat_rows = []
         for col in num_cols:
@@ -389,7 +464,6 @@ def _write_stat_tables_and_chart_to_sheet(
     aux_sheets: dict[str, pd.DataFrame] | None = None,
     sheet_name: str = "2_시트통합요약_및_핵심집계",
 ):
-    """보조 시트(Summary·Environment) 요약과 핵심 분류/판정/색상문맥 집계표 및 차트를 기록합니다."""
     tables = build_korean_stat_tables(df, aux_sheets=aux_sheets)
     ws = writer.book.create_sheet(title=sheet_name)
 
@@ -411,7 +485,7 @@ def _write_stat_tables_and_chart_to_sheet(
             current_row += 1
 
         end_row = current_row - 1
-        if any(k in title for k in ["라인별", "분류별", "판정"]) and chart_target_coords is None:
+        if any(k in title for k in ["그룹핑", "라인별", "분포", "판정"]) and chart_target_coords is None:
             chart_target_coords = (header_row, end_row, title)
 
         current_row += 2
@@ -426,7 +500,7 @@ def _write_stat_tables_and_chart_to_sheet(
             chart.style = 10
             chart.title = f"[핵심 집계 차트] {c_title}"
             chart.y_axis.title = "건수"
-            chart.x_axis.title = "항목"
+            chart.x_axis.title = "그룹 / 항목"
             chart.width = 16
             chart.height = 10
 
