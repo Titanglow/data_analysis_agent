@@ -15,7 +15,14 @@ from data_agent.excel_exporter import (
     build_korean_stat_tables,
 )
 from data_agent.llm import get_installed_ollama_models
-from data_agent.tools.data_loader import load_and_sync_to_db, filter_by_keywords, run_sql_query, DB_PATH, TABLE_NAME
+from data_agent.tools.data_loader import (
+    load_and_sync_to_db,
+    filter_by_keywords,
+    run_sql_query,
+    export_db_to_sql_script,
+    DB_PATH,
+    TABLE_NAME,
+)
 
 CONFIG_DIR = Path(".streamlit")
 CONFIG_FILE = CONFIG_DIR / "config.toml"
@@ -61,11 +68,11 @@ DISTINCT_PALETTE = ["#2563EB", "#DC2626", "#059669", "#D97706", "#7C3AED", "#089
 
 st.title("📊 자연어 기반 사내 데이터 분석 Agent")
 
+# 빠른 모드를 제외하고 완성도 높은 '로컬 정밀 모드'로 일원화
 MODEL_LABELS = {
     "cloud_groq": "⚡ Cloud: Groq (초고속 무료 API)",
     "cloud_gemini": "☁️ Cloud: Gemini (Google 무료 API)",
-    "local_ollama_fast": "🚀 Local: Ollama 빠른 모드 (사내보안·고속)",
-    "local_ollama": "🔒 Local: Ollama 정밀 모드 (사내보안·2단계)",
+    "local_ollama": "🔒 Local: Ollama (사내보안 정밀 모드)",
     "mock": "🧪 테스트 모드 (Mock·0.2초 검증)",
 }
 
@@ -75,21 +82,14 @@ if "last_analyzed_df" not in st.session_state:
     st.session_state["last_analyzed_df"] = None
 
 
-# =====================================================================
-# 🔍 1. 한국어 자연어 -> SQL 스마트 변환기 ('A라인랑 B라인' -> IN 조건 처리)
-# =====================================================================
 def build_smart_sql(nl_query: str, df: pd.DataFrame, table_name: str) -> str:
-    """
-    'A라인랑 B라인 조회해줘'처럼 동일 컬럼의 여러 값을 질문하면 IN ('A라인', 'B라인') (OR 조건)으로 묶고,
-    서로 다른 컬럼('B라인 야간 불량수 20 이상')은 AND로 정확히 결합합니다.
-    """
+    """동일 컬럼 복수 키워드는 IN (...) 조건으로, 서로 다른 컬럼 조건은 AND로 결합합니다."""
     if not nl_query or not nl_query.strip():
         return f"SELECT * FROM {table_name} LIMIT 50;"
 
     q = nl_query.strip()
     col_matches: dict[str, list[str]] = {}
 
-    # 1. 범주형(문자열) 컬럼별 매칭값 수집
     str_cols = df.select_dtypes(include=["object", "category"]).columns.tolist()
     for col in str_cols:
         matched_vals = []
@@ -97,7 +97,6 @@ def build_smart_sql(nl_query: str, df: pd.DataFrame, table_name: str) -> str:
             val_clean = val.strip()
             if not val_clean:
                 continue
-            # 예: 'A라인', 'B라인' 또는 'A', 'B' + 컬럼명 조합 감지
             if val_clean.lower() in q.lower() or f"{val_clean}{col}".lower() in q.lower():
                 matched_vals.append(val_clean)
         if matched_vals:
@@ -108,11 +107,9 @@ def build_smart_sql(nl_query: str, df: pd.DataFrame, table_name: str) -> str:
         if len(vals) == 1:
             where_clauses.append(f"{col} = '{vals[0]}'")
         else:
-            # 같은 컬럼에 2개 이상 매칭되면 IN (...) 절로 생성하여 둘 다 조회되게 처리!
             joined_vals = ", ".join(f"'{v}'" for v in vals)
             where_clauses.append(f"{col} IN ({joined_vals})")
 
-    # 2. 수치형 컬럼 조건 매칭
     num_cols = df.select_dtypes(include=["number"]).columns.tolist()
     nums = re.findall(r"\d+(?:\.\d+)?", q)
     if nums and num_cols:
@@ -143,14 +140,8 @@ def build_smart_sql(nl_query: str, df: pd.DataFrame, table_name: str) -> str:
     return sql
 
 
-# =====================================================================
-# 🤖 2. AI 비서형 맞춤 분석 질문 자동 생성기 (조회 조건 + 데이터 수치 자동 조합)
-# =====================================================================
 def generate_smart_assistant_question(target_df: pd.DataFrame, raw_df: pd.DataFrame, user_filter_text: str) -> str:
-    """
-    1번에서 조회한 필터 조건과 현재 데이터프레임의 실제 통계(라인, 생산량, 불량수, 불량률, 최다 불량유형)를
-    비서처럼 스스로 조합하여 최적의 AI 분석 질문을 만들어 줍니다.
-    """
+    """조회된 데이터의 실제 통계(라인, 생산량, 불량수, 불량률, 최다 불량유형)를 조합해 맞춤 질문을 생성합니다."""
     if len(target_df) == 0:
         return "현재 데이터의 핵심 추세, 이상 징후, 원인 가설 및 조치 제안을 정리해 줘."
 
@@ -185,17 +176,14 @@ def generate_smart_assistant_question(target_df: pd.DataFrame, raw_df: pd.DataFr
 
     return (
         f"[AI 비서 자동 맞춤 질문] {scope_title} ({stat_str}) 데이터를 바탕으로 "
-        f"① 주차·시간대별 불량률 추세, ② 주요 불량유형 및 기준(1.5%) 초과 이상 항목, "
-        f"③ 해당 데이터 특성에 맞는 5M1E 원인 가설, ④ 담당 부서별 즉시 조치(24h) 및 근본 대책(1개월)을 집중 분석해 줘."
+        f"① 주차·시간대별 불량률 추세(%p), ② 주요 불량유형 및 기준(1.5%) 초과 이상 항목, "
+        f"③ 해당 데이터 특성에 맞는 5M1E 원인 가설, ④ 담당 부서별 즉시 조치(24h)·근본 대책(1개월) 및 목표 KPI를 정밀 분석해 줘."
     )
 
 
-# =====================================================================
-# 🌐 3. 데이터 키워드 기반 실시간 뉴스 RSS 및 외부 참고 링크 수집기
-# =====================================================================
 @st.cache_data(ttl=600, show_spinner=False)
 def fetch_related_news_links(query_keyword: str, max_items: int = 4) -> list[dict[str, str]]:
-    """데이터에서 추출된 핵심 키워드로 Google 뉴스 RSS에서 실제 최신 뉴스 제목과 링크를 가져옵니다."""
+    """데이터에서 추출된 핵심 키워드로 Google 뉴스 RSS에서 최신 뉴스 제목과 링크를 가져옵니다."""
     encoded = urllib.parse.quote(query_keyword)
     rss_url = f"https://news.google.com/rss/search?q={encoded}&hl=ko&gl=KR&ceid=KR:ko"
     articles = []
@@ -215,7 +203,7 @@ def fetch_related_news_links(query_keyword: str, max_items: int = 4) -> list[dic
 
 
 def render_related_links_box(target_df: pd.DataFrame):
-    """분석 중인 데이터(불량유형, 산업/공정 키워드)와 연관된 실시간 뉴스 및 기술 표준 검색 링크를 제공합니다."""
+    """분석 중인 데이터와 연관된 실시간 뉴스 및 기술 표준 검색 링크를 제공합니다."""
     keywords = []
     if "불량유형" in target_df.columns and "불량수" in target_df.columns:
         top_defects = target_df.groupby("불량유형")["불량수"].sum().sort_values(ascending=False).index.tolist()
@@ -401,9 +389,6 @@ def show_model_visual_popup(m_code: str, res_data: dict, target_df: pd.DataFrame
     )
 
 
-# =====================================================================
-# 🧩 @st.fragment: 2번 차트 조작 시 3번 AI 분석이 끊기거나 초기화되지 않도록 독립 분리!
-# =====================================================================
 @st.fragment
 def render_visualization_fragment(target_df: pd.DataFrame):
     st.subheader("2️⃣ 조회된 데이터 다차원 시각화 & 한글 기초통계 집계")
@@ -459,9 +444,6 @@ def render_visualization_fragment(target_df: pd.DataFrame):
             st.dataframe(t_df, use_container_width=True, hide_index=True)
 
 
-# =====================================================================
-# 🧩 @st.fragment: 3번 AI 비교 분석 & 비서형 자동 질문 & 뉴스 링크 독립 구역
-# =====================================================================
 @st.fragment
 def render_agent_analysis_fragment(
     target_df: pd.DataFrame,
@@ -470,9 +452,8 @@ def render_agent_analysis_fragment(
     selected_models: list[str],
     active_filter_text: str,
 ):
-    st.subheader("3️⃣ AI 비서 맞춤 질문 & 에이전트 동시 비교 분석 (Groq vs Gemini vs Ollama)")
+    st.subheader("3️⃣ AI 비서 맞춤 질문 & 에이전트 동시 비교 분석 (Groq vs Gemini vs Ollama 정밀 모드)")
 
-    # 1번 조회 조건과 데이터 수치를 조합해 AI 비서가 자동으로 만든 추천 질문
     auto_assistant_q = generate_smart_assistant_question(target_df, raw_df, active_filter_text)
 
     q_mode = st.radio(
@@ -490,10 +471,9 @@ def render_agent_analysis_fragment(
     else:
         question = st.text_input("💡 에이전트에게 지시할 분석 질문을 입력하세요:", value=auto_assistant_q)
 
-    # 데이터 키워드 기반 실시간 외부 뉴스 및 기술 자료 링크 박스
     render_related_links_box(target_df)
 
-    if st.button("🚀 에이전트 분석 실행 (선택 모델 동시 병렬 실행)", type="primary"):
+    if st.button("🚀 에이전트 정밀 분석 실행 (선택 모델 동시 병렬 실행)", type="primary"):
         if not selected_models:
             st.warning("좌측 사이드바에서 최소 1개 이상의 모델을 선택해주세요.")
         else:
@@ -510,7 +490,7 @@ def render_agent_analysis_fragment(
             )
 
             new_results = {}
-            status_box = st.status("⚡ 선택한 AI 모델들을 동시에 병렬 실행하고 있습니다...", expanded=True)
+            status_box = st.status("⚡ 선택한 AI 모델(정밀 모드)들을 동시에 병렬 실행하고 있습니다...", expanded=True)
 
             def _run_single_model(m_code: str):
                 res = agent_app.invoke({
@@ -530,9 +510,9 @@ def render_agent_analysis_fragment(
                 for future in as_completed(future_map):
                     m_done, res_done = future.result()
                     new_results[m_done] = res_done
-                    status_box.write(f"✅ **{MODEL_LABELS.get(m_done, m_done)}** 분석 완료! (`{res_done['elapsed_time']}초`)")
+                    status_box.write(f"✅ **{MODEL_LABELS.get(m_done, m_done)}** 정밀 분석 완료! (`{res_done['elapsed_time']}초`)")
 
-            status_box.update(label="🎉 모든 모델 분석 완료! (차트 조작 시에도 이 결과는 초기화되지 않습니다)", state="complete", expanded=False)
+            status_box.update(label="🎉 모든 모델 정밀 분석 완료! (차트 조작 시에도 이 결과는 초기화되지 않습니다)", state="complete", expanded=False)
             st.session_state["saved_results"] = new_results
             st.session_state["last_analyzed_df"] = target_df
 
@@ -559,7 +539,7 @@ def render_agent_analysis_fragment(
             st.caption("👆 **각 모델의 제목 버튼을 클릭하면 상세 다차원 시각화 팝업창이 열립니다.**")
         with top_c2:
             st.download_button(
-                label="📚 전체 모델 종합 비교 엑셀 추출 (차트·섹션정리 통합본 .xlsx)",
+                label="📚 전체 모델 종합 비교 엑셀 추출 (줄바꿈·차트 완비 통합본 .xlsx)",
                 data=combined_excel_bytes,
                 file_name="report_ALL_models_combined.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -579,7 +559,7 @@ def render_agent_analysis_fragment(
                 st.markdown(res_item["report"])
 
                 st.download_button(
-                    label=f"📥 {m_code} 개별 엑셀 추출 (섹션정리·차트 포함 .xlsx)",
+                    label=f"📥 {m_code} 개별 엑셀 추출 (줄바꿈·차트 포함 .xlsx)",
                     data=res_item["excel_bytes"],
                     file_name=f"report_{m_code}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -588,9 +568,6 @@ def render_agent_analysis_fragment(
                 )
 
 
-# =====================================================================
-# ⚙️ 사이드바 설정
-# =====================================================================
 with st.sidebar:
     st.header("⚙️ 실행 및 비교 모델 설정")
     run_type = st.radio("실행 방식 선택", options=["다중 모델 동시 비교 (PoC)", "단일 모델 실행"], index=0)
@@ -603,7 +580,7 @@ with st.sidebar:
         selected_models = st.multiselect(
             "비교할 AI 모델들을 선택하세요 (병렬 동시 실행)",
             options=list(MODEL_LABELS.keys()),
-            default=["cloud_groq", "cloud_gemini", "local_ollama_fast"],
+            default=["cloud_groq", "cloud_gemini", "local_ollama"],
             format_func=lambda x: MODEL_LABELS[x],
         )
 
@@ -611,13 +588,13 @@ with st.sidebar:
     ollama_models = get_installed_ollama_models()
     with st.expander("🖥️ 로컬 Ollama 상세 설정 & 모델 안내 (클릭)", expanded=False):
         st.markdown(
-            "**💡 로컬 Ollama를 왜 쓰나요?**\n"
-            "- **보안:** 사내 데이터를 외부 인터넷으로 전송하지 않고 내 PC 안에서만 안전하게 분석합니다.\n"
-            "- **무료:** API 요금이나 한도 없이 무제한 실행됩니다.\n\n"
+            "**💡 로컬 Ollama 정밀 모드란?**\n"
+            "- **보안:** 사내 데이터를 외부 인터넷으로 전송하지 않고 내 PC 안에서만 2단계(Analyzer → Reporter) 정밀 분석을 수행합니다.\n"
+            "- **토큰 한도:** 최대 **3,500 토큰**(`num_ctx=8192`)으로 확장되어 긴 보고서도 잘림 없이 완주합니다.\n\n"
             "**📌 세부 모델 차이점**\n"
             "- `qwen2.5-coder:7b`: **(기본 추천)** 표·숫자·SQL 분석 정확도 최고\n"
             "- `qwen3:8b` / `llama3.1:8b`: 한국어 보고서 문장력 우수\n"
-            "- `qwen3:4b` / `qwen2.5:3b`: 일반 사무용 PC용 초고속 경량 모델"
+            "- `qwen3:4b` / `qwen2.5:3b`: 일반 사무용 PC용 경량 모델"
         )
         chosen_ollama = st.selectbox("구동할 로컬 모델 변경", options=ollama_models, index=0)
         os.environ["LOCAL_MODEL_NAME"] = chosen_ollama
@@ -634,7 +611,7 @@ if uploaded_file is not None:
 
     # 1. 자연어 쿼리 자동 생성 및 SQLite DB 조회
     st.subheader("1️⃣ 자연어 기반 데이터 수집 및 SQLite DB 자동 조회")
-    tab_nl, tab_kw, tab_sql = st.tabs(["🤖 자연어 → SQL 자동 변환", "🔍 키워드 조합 필터", "🗄️ 수동 SQL 편집기"])
+    tab_nl, tab_kw, tab_sql = st.tabs(["🤖 자연어 → SQL 자동 변환", "🔍 키워드 조합 필터", "🗄️ 수동 SQL 편집기 (.db / .sql 추출)"])
 
     active_filter_text = ""
 
@@ -666,25 +643,42 @@ if uploaded_file is not None:
         st.dataframe(df, use_container_width=True, hide_index=True)
 
     with tab_sql:
+        st.caption("직접 SQL 쿼리를 수정·실행하고, 생성된 데이터베이스를 `.db` 원본 또는 **Notepad++ 열람용 `.sql` 스크립트**로 내려받을 수 있습니다.")
         sql_input = st.text_area("수동 SQL 입력", value=auto_sql, height=80)
-        if st.button("수동 SQL 실행"):
+        if st.button("▶️ 수동 SQL 실행"):
             try:
                 df = run_sql_query(sql_input)
+                st.success(f"쿼리 실행 성공: {len(df)}건 조회됨")
                 st.dataframe(df, use_container_width=True, hide_index=True)
             except Exception as e:
                 st.error(f"오류: {e}")
+
         if DB_PATH.exists():
-            with open(DB_PATH, "rb") as f:
-                st.download_button("💾 SQLite DB 파일(.db) 다운로드", data=f, file_name="internal_analysis.db")
+            dl_c1, dl_c2 = st.columns(2)
+            with dl_c1:
+                with open(DB_PATH, "rb") as f:
+                    st.download_button(
+                        label="💾 SQLite DB 바이너리 파일 (.db) 다운로드",
+                        data=f,
+                        file_name="internal_analysis.db",
+                        mime="application/octet-stream",
+                        use_container_width=True,
+                    )
+            with dl_c2:
+                sql_dump_bytes = export_db_to_sql_script(current_sql=sql_input)
+                st.download_button(
+                    label="📝 Notepad++ 조회용 SQL 덤프 (.sql) 다운로드",
+                    data=sql_dump_bytes,
+                    file_name="internal_analysis_dump.sql",
+                    mime="application/sql",
+                    type="primary",
+                    use_container_width=True,
+                )
 
     target_df = df if len(df) > 0 else raw_df
     summary_df = target_df.describe(include="all").fillna("")
     st.divider()
 
-    # 2. 다차원 시각화 차트 & 한글 기초통계 집계 (@st.fragment로 독립 동작)
     render_visualization_fragment(target_df)
-
     st.divider()
-
-    # 3. AI 비서 맞춤 질문 + 연관 뉴스 링크 + 다중 모델 동시 비교 (@st.fragment로 독립 동작)
     render_agent_analysis_fragment(target_df, raw_df, summary_df, selected_models, active_filter_text)
