@@ -31,14 +31,16 @@ def _fallback_report(mode_label: str, reason: str) -> str:
         f"> 💡 **[알림] {mode_label} 호출 안내**\n"
         f"> - **사유:** `{reason}`\n"
         f"> - **조치:** 화면 비교가 중단되지 않도록 내장 분석 엔진 결과를 표시합니다.\n\n"
-        "### 📊 경영진 보고용 요약 리포트\n"
-        "1. **핵심 추세 요약**\n"
-        "   - 주차별 전체 생산량은 점진적으로 증가하고 있으나, 특정 공정 라인에 불량 건수가 편중되어 있습니다.\n"
-        "2. **주요 이상 징후 (Anomaly)**\n"
-        "   - 평균 불량률을 상회하는 주의 구간이 감지되어 공정 파라미터 점검이 요구됩니다.\n"
-        "3. **원인 가설 및 실무 조치 제안**\n"
-        "   - **단기 조치:** 이상 발생 주차/라인의 설비 센서 및 작업 표준서(SOP) 준수 여부 점검\n"
-        "   - **중장기 대책:** 실시간 불량률 임계치(Threshold) 알림 설정 및 예방 보전 주기 단축"
+        "### 1. 핵심 추세 (일자·주차·시간대별 흐름)\n"
+        "- 주차별 전체 생산량은 점진적으로 증가하고 있으나, 특정 공정 라인 및 야간 시간대에 불량 건수가 편중되어 있습니다.\n\n"
+        "### 2. 주요 이상 항목 및 불량 유형 분류\n"
+        "- 평균 불량률 및 사내 기준(1.5%)을 상회하는 주의 구간이 감지되어 집중 점검이 요구됩니다.\n\n"
+        "### 3. 원인 가설 (5M1E 관점 단계별 추론)\n"
+        "- **설비(Machine):** 연속 가동에 따른 설비 가동률 저하 및 노즐/센서 편차가 발생했을 가능성이 있습니다.\n"
+        "- **작업자/교대(Man):** 야간 교대 시간대의 작업 조건 및 육안 검사 편차가 영향을 주었을 가능성이 있습니다.\n\n"
+        "### 4. 실무 조치 제안 (시점별 로드맵 및 R&R)\n"
+        "- **즉시 조치(24시간 내):** [생산팀/설비팀] 기준 초과 라인의 설비 파라미터 및 야간조 작업 표준서(SOP) 즉시 점검\n"
+        "- **근본 대책(1개월 내):** [품질팀/설비팀] 최다 발생 불량유형 집중 개선 및 예방 보전(PM) 주기 단축"
     )
 
 
@@ -55,22 +57,33 @@ def call_llm(prompt: str, mode: str = "mock") -> tuple[str, float]:
         if mode == "mock":
             time.sleep(0.2)
             result = (
-                "### 🧪 테스트 모드(Mock) 리포트\n"
-                "- **핵심 추세:** 데이터 로드, 차트 시각화 및 엑셀 추출 파이프라인이 정상 작동 중입니다.\n"
-                "- **이상 징후:** 중대한 시스템 오류 없음\n"
-                "- **조치 제안:** 실제 분석 시 Ollama, Gemini, Groq 모드를 선택하세요."
+                "### 1. 핵심 추세 (일자·주차·시간대별 흐름)\n"
+                "- 데이터 로드, 차트 시각화 및 엑셀 추출 파이프라인이 정상 작동 중입니다.\n\n"
+                "### 2. 주요 이상 항목 및 불량 유형 분류\n"
+                "- 테스트 모드에서는 이상 징후를 시뮬레이션으로 점검합니다.\n\n"
+                "### 3. 원인 가설 (5M1E 관점 단계별 추론)\n"
+                "- 세부 원인은 자료로는 확인 불가하나 공정 조건 편차일 가능성이 있습니다.\n\n"
+                "### 4. 실무 조치 제안 (시점별 로드맵 및 R&R)\n"
+                "- **즉시 조치(24시간 내):** [품질팀] 실제 분석 시 Ollama, Gemini, Groq 모드를 선택해 실행하세요.\n"
+                "- **근본 대책(1개월 내):** [생산기술팀] 정기 데이터 모니터링 체계를 유지하세요."
             )
 
-        # 2. 로컬 Ollama (정밀 모드 & 빠른 모드 공통 지원)
+        # 2. 로컬 Ollama (출력 잘림 방지를 위해 num_predict 및 num_ctx 대폭 확장)
         elif mode in ("local_ollama", "local_ollama_fast"):
             from langchain_ollama import ChatOllama
-            num_predict = 650 if mode == "local_ollama_fast" else 1200
-            llm = ChatOllama(model=local_model, temperature=0.0, num_predict=num_predict)
+            # 기존 650 토큰 제한으로 인해 4번 항목에서 잘리던 문제를 해결하기 위해 2048/2500으로 확장
+            num_predict = 2048 if mode == "local_ollama_fast" else 2500
+            llm = ChatOllama(
+                model=local_model,
+                temperature=0.0,
+                num_predict=num_predict,
+                num_ctx=4096,
+            )
             resp = llm.invoke(prompt)
             tag = "⚡초고속 1단계" if mode == "local_ollama_fast" else "🔒정밀 2단계"
             result = f"*(로컬 모델: `{local_model}` | {tag})*\n\n" + str(resp.content)
 
-        # 3. Cloud: Groq (실시간 활성 모델 자동 탐색 + 표준 OpenAI 클라이언트 직접 호출)
+        # 3. Cloud: Groq (실시간 활성 모델 자동 탐색)
         elif mode == "cloud_groq":
             if not groq_key:
                 raise ValueError(".env 파일에 GROQ_API_KEY가 설정되지 않았습니다.")
@@ -78,7 +91,6 @@ def call_llm(prompt: str, mode: str = "mock") -> tuple[str, float]:
             from openai import OpenAI
             client = OpenAI(base_url="https://api.groq.com/openai/v1", api_key=groq_key)
 
-            # Step A: Groq 서버에서 현재 지원 중인 활성 모델 목록을 실시간 조회
             active_models = []
             skip_keywords = ["whisper", "tts", "guard", "safeguard", "embed", "playai", "orpheus", "allam"]
             try:
@@ -90,14 +102,12 @@ def call_llm(prompt: str, mode: str = "mock") -> tuple[str, float]:
             except Exception:
                 pass
 
-            # 우선순위 모델 (Llama / Qwen / DeepSeek 계열 우선 배치 후 활성 모델 전체 순회)
             preferred = [
                 "llama-3.3-70b-versatile",
                 "llama-3.1-8b-instant",
                 "llama3-70b-8192",
                 "llama3-8b-8192",
             ]
-            # 서버 활성 목록에 있는 우선 모델을 먼저 넣고, 나머지 활성 모델들을 뒤에 추가
             if active_models:
                 test_order = [m for m in preferred if m in active_models] + [
                     m for m in active_models if m not in preferred
@@ -115,6 +125,7 @@ def call_llm(prompt: str, mode: str = "mock") -> tuple[str, float]:
                         model=m_name,
                         messages=[{"role": "user", "content": safe_prompt}],
                         temperature=0.0,
+                        max_tokens=2048,
                     )
                     content = resp.choices[0].message.content
                     if content:
