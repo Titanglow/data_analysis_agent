@@ -1,34 +1,50 @@
-# 📊 [W46 주간 진행 보고] 사내 데이터 분석 AI Agent 구축
+# 📊 [W46 주간 진행 보고] 자연어 기반 사내 데이터 분석 AI Agent 구축 및 고도화
 
 ## 1. 프로젝트 개요
--   과제 목적:   사내 기밀 데이터 외부 유출 방지(Local LLM) 및 외부 고성능 Cloud AI 비교(PoC)를 통한 실무형 데이터 분석 자동화 에이전트 자체 개발 역량 확보
--   핵심 설계 원칙:   
-  1.   역할 분리:   합계·건수·불량률·전주 대비 증감(%p) 계산은 Python(Pandas/SQLite) 코드가 100% 정확히 수행하고, LLM은 추세 해석·원인 가설(5M1E)·조치 제안 작성에 집중
-  2.   멀티 모델 병렬 비교:   Local Ollama(`qwen2.5-coder:7b`) + Cloud API(`Groq`, `Google Gemini`) 동시 병렬 실행
+- **과제명:** 자연어 기반 사내 데이터(CSV·다중 시트 Excel) 자동 분석 및 리포트 생성 AI Agent 개발 (내부 역량 강화 과제)
+- **추진 목적:** 사내 기밀 데이터 외부 유출 방지(Local LLM: Ollama 정밀 모드)와 외부 고성능 Cloud AI(Groq, Google Gemini) 동시 병렬 비교(PoC)를 통한 실무형 AI 에이전트 자체 구축 역량 확보
+- **핵심 설계 원칙:**
+  1. **역할 분리(Role Separation):** 파이썬 코드 노드(`analyzer_node`)가 수치 통계·시트 분리·색상 문맥·유사 제목 그룹핑을 0.01초 만에 100% 정확히 계산하고, LLM 노드(`reporter_node`)는 추세 해석·원인 가설·조치 제안 작성에 집중
+  2. **비서형 자동화(AI Assistant):** 조회 조건과 시트 구성, 강조 셀 의미를 스스로 파악해 최적의 분석 질문과 연관 뉴스를 자동 추천
 
-## 2. 프로젝트 폴더 및 파일 구조 현황 (W46)
-| 경로 및 파일명 | 핵심 역할 및 기능 | 상태 |
+---
+
+## 2. 프로젝트 폴더 및 파일 구조 현황 (W46 최종 기준)
+| 경로 및 파일명 | 핵심 역할 및 최신 구현 기능 | 상태 |
 | :--- | :--- | :---: |
-| `app.py` | Streamlit 메인 대시보드 (자연어→SQL, 다차원 차트, 병렬 비교, 시각화 팝업) | ✅ 완료 |
-| `run.bat` / `main.py` | 원클릭 대시보드 실행 배치 파일 및 CLI 테스트 실행 파일 | ✅ 완료 |
-| `sample_data.csv` | 다차원 공정 샘플 데이터 (일자, 주차, 시간대, 라인, 생산량, 불량수, 불량유형 등) | ✅ 완료 |
-| `data_agent/llm.py` | 멀티 LLM 호출기 (Ollama 정밀/빠른 모드, Groq/Gemini 활성 모델 자동 탐색 및 폴백) | ✅ 완료 |
-| `data_agent/graph.py` | LangGraph 워크플로우 (`START` → `analyzer` → `reporter` → `END`) | ✅ 완료 |
-| `data_agent/excel_exporter.py` | 100% 한글 통계·라인·불량유형 집계표 및 엑셀 네이티브 차트(`BarChart`) 추출기 | ✅ 완료 |
-| `data_agent/nodes/analyzer_node.py` | 1단계 분석가 노드 (JSON 패턴 추출 및 빠른 모드 파이썬 고속 처리) | ✅ 완료 |
-| `data_agent/nodes/reporter_node.py` | 2단계 보고자 노드 (사내 기준 1.5% IF/ELSE 경고 배너 + 4단락 5M1E 리포트) | ✅ 완료 |
-| `data_agent/tools/data_loader.py` | CSV/Excel 업로드 즉시 SQLite DB(`internal_analysis.db`) 자동 구축 및 SQL 실행 | ✅ 완료 |
-| `data_agent/config.py` | 공통 설정값(불량률 임계치, 모델 기본값 등) 분리용 파일 | ⚪ W47 분리 예정 |
-| `data_agent/state.py` | LangGraph State 정의 분리용 파일 (현재 `graph.py` 내 포함) | ⚪ W47 분리 예정 |
-| `data_agent/tools/visualizer.py` | 시각화 차트 함수 모듈 분리용 파일 (현재 `app.py` 내 포함) | ⚪ W47 분리 예정 |
+| `app.py` | Streamlit 메인 대시보드 (특정 컬럼·부분 단어 자연어→SQL 변환, 유사 제목 자동 묶음 차트, 긴 문장 가로형 차트, AI 비서 맞춤 질문, 연관 뉴스 RSS, `@st.fragment` 중단 방지) | ✅ 완료 |
+| `data_agent/tools/data_loader.py` | 다중 시트 엑셀 스마트 분리(핵심 시트 vs `Summary`·`Environment` 보조 시트), 셀 배경색(`🎨빨강강조` 등) 추출, SQLite DB 동기화 및 Notepad++용 `.sql` 덤프 생성 | ✅ 완료 |
+| `data_agent/excel_exporter.py` | 유사 제목(`Title`) 키워드 클러스터링, 셀 배경색 컬럼별 문맥 해석표, 보조 시트 통합 요약, 섹션별 줄바꿈 정돈 및 `BarChart` 내장 마스터 엑셀(`.xlsx`) 추출기 | ✅ 완료 |
+| `data_agent/llm.py` | 멀티 LLM 라우터 (Ollama 사내보안 정밀 모드 3,500토큰/8,192컨텍스트 확장, Groq 및 Google Gemini 실시간 활성 모델 자동 탐색 및 폴백) | ✅ 완료 |
+| `data_agent/nodes/analyzer_node.py` | 1단계 파이썬 고속 정밀 집계 노드 (0.01초 내 시트 요약·색상 문맥·이상 징후 추출로 LLM 중복 호출 병목 제거) | ✅ 완료 |
+| `data_agent/nodes/reporter_node.py` | 2단계 도메인별(제조 공정 vs TC 검증 시트) 맞춤 보고서 노드 (JSON 출력 마크다운 자동 변환, 깨진 한 줄 표 복원, 4단락 R&R·KPI 완결 보정) | ✅ 완료 |
+| `data_agent/graph.py` | LangGraph `StateGraph` 워크플로우 정의 (`START` → `analyzer` → `reporter` → `END`) | ✅ 완료 |
+| `docs/W46_progress.md` | W46 주차별 개발 진행 내역 및 기술 트러블슈팅 기록 문서 | ✅ 완료 |
+| `run.bat` / `main.py` | 원클릭 가상환경(`.venv`) 활성화 및 대시보드 실행 배치 파일 / CLI 테스트 도구 | ✅ 완료 |
+| `sample_data.csv` | 다차원 공정 분석용 샘플 데이터 (일자, 주차, 시간대, 라인, 생산량, 불량수, 불량유형 등) | ✅ 완료 |
+| `.env` / `.gitignore` | API 키 보안 분리 보관 및 GitHub 업로드 자동 차단 설정 | ✅ 완료 |
+| `data_agent/config.py`, `state.py`, `tools/visualizer.py` | 공통 상수 설정, State 스키마, 시각화 함수 분리용 모듈 파일 (현재 `app.py` 및 `graph.py` 내 통합 구현됨) | ⚪ W47 분리 예정 |
 
-## 3. W46 주요 개발 및 문제 해결 실적
-1.   Git/GitHub 연동 및 보안 설정:   PyCharm `.venv` 환경 구축 및 `.gitignore`를 통한 `.env` API 키 외부 노출 원천 차단
-2.   SQLite 자동 DB화 및 자연어→SQL 변환기:   파일 업로드 즉시 DB 테이블(`internal_data`) 생성 및 한국어 자연어 조건(`"A라인만"`, `"불량수 20 넘는 행"`) 자동 SQL 변환
-3.   API 오류 해결 및 병렬 실행:   OpenAI 크레딧 소진 이슈를 무료 초고속 `Groq API`로 대체하고, 서버 활성 모델 자동 탐색(`models.list`)으로 404 에러 해결. `ThreadPoolExecutor`로 다중 모델 동시 병렬 실행 구현
-4.   UI/UX 및 다차원 시각화 고도화:   초록색(`#059669`) 테마 통일, `st.session_state`로 엑셀 추출 시 화면 증발 현상 해결, 모델 제목 클릭 시 `@st.dialog` 상세 시각화 팝업 구현, 사전 집계(Groupby)로 합쳐진 막대그래프 가독성 해결
-5.   한글 집계 및 차트 내장 마스터 엑셀 추출:   영문 `describe()` 제거 후 100% 한글 기초통계·불량유형·전주 대비 증감(%p) 표 구현 및 엑셀 시트 내 비교 막대차트 자동 삽입
+---
+
+## 3. W46 주요 개발 및 기술 고도화 실적
+1. **한국어 자연어 → SQL 스마트 변환 엔진 고도화:**
+   - `"Title칸에 문서 들어간거 조회해줘"`, `"배달만 조회해줘"`, `"쿠폰이나 내역 조회"`, `"A라인랑 B라인 조회"` 입력 시 한국어 조사(`~만`, `~이나`, `~랑`)를 자동 분리하고 특정 컬럼 `LIKE` 검색 및 복수 조건(`OR`/`IN`) SQL을 정확히 생성
+2. **다중 시트 Excel(`.xlsx`) 역할 자동 분리 및 셀 배경색(`🎨`) 문맥 해석:**
+   - 핵심 데이터 시트(예: `Test Cases`)와 보조 시트(`Summary`, `Environment` 등)를 자동 분리하여 행 건수 왜곡 방지
+   - 빨간색 배경 셀을 무조건 불합격(FAIL)으로 단정하지 않고, 어느 컬럼(`Priority` 중요도, `Technique` 기법, `Status` 미실행 등)에 표시되었는지 문맥을 판별해 해석
+3. **범용 다차원 시각화 고도화 (유사 제목 클러스터링 & 긴 문장 가로형 차트):**
+   - `Title`처럼 행마다 문장이 달라 1건(5%)씩 쪼개지던 문제를 핵심 키워드 빈도 기반 자동 그룹핑(`📁 [문서] 관련 항목`, `📁 [검색] 관련 항목` 등)으로 해결
+   - `Precondition` 등 긴 문장은 요약 라벨과 가로형 막대 차트(`Horizontal Bar`) 및 14px 확대 폰트를 적용해 가독성 확보
+4. **AI 비서 맞춤 질문 조합 · 실시간 연관 뉴스(RSS) · Notepad++용 `.sql` 추출:**
+   - 조회 데이터의 시트 구성·주제 분포·불량률을 조합해 AI 비서가 자동으로 분석 질문을 생성하며, 관련 최신 뉴스 헤드라인 및 포털/학술 검색 링크 제공
+   - 수동 SQL 편집기에서 `.db` 바이너리 파일과 Notepad++ 열람용 `.sql` 전체 덤프 스크립트 동시 추출 지원
+5. **3대 AI 모델(Groq·Gemini·Ollama 정밀 모드) 병렬 속도 혁신 및 마스터 엑셀 추출:**
+   - 1단계 분석을 파이썬 고속 집계(0.01초)로 전환해 로컬 Ollama 대기 시간을 대폭 단축하고 출력 토큰(3,500~8,000) 확장
+   - JSON 출력 마크다운 자동 변환, 한 줄 표(`||`) 줄바꿈 복원, 빈 불릿(`•`) 제거 및 엑셀 시트 내 비교 막대차트(`BarChart`) 자동 삽입 완성
+
+---
 
 ## 4. 향후 계획 (W47 ~ W48)
--   W47:   빈 모듈 3개(`config.py`, `state.py`, `visualizer.py`) 코드 분리 리팩토링, 사내 불량률 기준값(1.5%) UI 조절 기능, 타 부서 CSV 업로드 시 양식/결측치 자동 검증 추가
--   W48:   사내 규정·기준서·과거 보고서 지식(RAG) 연동 및 Word(`.docx`) 주간보고서 자동 다운로드 기능 추가
+- **W47 (모듈 분리 리팩토링 & 데이터 양식 검증):** 0바이트 파일 3종(`config.py`, `state.py`, `visualizer.py`) 코드 분리 완성, 사내 불량률 기준값(1.5%) 실시간 조절 UI 추가, 부서별 엑셀 양식 자동 검증(Validation) 강화
+- **W48 (사내 지식 RAG 연동 & Word 보고서 원클릭 추출):** 사내 표준 매뉴얼·점검 기준서 문서를 지식(Context)으로 연동 및 경영진 보고용 Word(`.docx`) 자동 다운로드 버튼 탑재
