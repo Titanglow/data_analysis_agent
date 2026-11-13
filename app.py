@@ -102,10 +102,6 @@ def style_dataframe_with_colors(df: pd.DataFrame):
     return df
 
 
-# =====================================================================
-# 🔍 고도화된 한국어 자연어 -> SQL 변환 엔진
-# ('Title칸에 문서 들어간거', '배달만 조회해줘', '쿠폰이나 내역 조회' 완벽 지원!)
-# =====================================================================
 COLUMN_ALIASES = {
     "title": ["title", "타이틀", "제목", "이름", "명칭", "시나리오명"],
     "id": ["id", "tc-id", "tc_id", "tc id", "아이디", "번호", "코드"],
@@ -128,11 +124,6 @@ NL_FILLER_WORDS = {
 
 
 def build_smart_sql(nl_query: str, df: pd.DataFrame, table_name: str) -> str:
-    """
-    1) 사용자가 'Title칸에 문서 들어간거'처럼 특정 컬럼을 지정하면 해당 컬럼만 정확히 LIKE 검색합니다.
-    2) '배달만 조회해줘', '쿠폰이나 내역 조회'처럼 부분 키워드만 입력해도 조사/어미를 떼어내고
-       실제 데이터가 들어있는 컬럼(또는 주요 텍스트 컬럼)에 대해 정확한 WHERE ... LIKE '%키워드%' SQL을 생성합니다.
-    """
     if not nl_query or not nl_query.strip():
         return f"SELECT * FROM {table_name} LIMIT 100;"
 
@@ -143,13 +134,11 @@ def build_smart_sql(nl_query: str, df: pd.DataFrame, table_name: str) -> str:
     all_cols = list(df.columns)
     where_clauses = []
 
-    # 1단계: 색상 키워드('빨강', '초록', '노랑', '배경', '강조') 우선 감지
     if any(k in q_orig for k in ["빨강", "빨간", "초록", "노랑", "배경", "색상", "색깔", "강조"]):
         color_kw = "빨강" if ("빨강" in q_orig or "빨간" in q_orig) else ("초록" if "초록" in q_orig else ("노랑" if "노랑" in q_orig else "강조"))
         or_likes = [f'"{col}" LIKE \'%{color_kw}%\'' for col in all_cols]
         return f"SELECT * FROM {table_name} WHERE (" + " OR ".join(or_likes) + ") LIMIT 100;"
 
-    # 2단계: 질문에서 특정 컬럼 지정 여부 감지 (예: 'Title칸에', '제목에', 'Precondition에서')
     target_cols = []
     matched_col_tokens = set()
     q_lower = q_orig.lower()
@@ -169,7 +158,6 @@ def build_smart_sql(nl_query: str, df: pd.DataFrame, table_name: str) -> str:
 
     target_cols = list(dict.fromkeys(target_cols))
 
-    # 3단계: 수치형 조건 감지 (예: '불량수 20 넘는 행')
     num_cols = df.select_dtypes(include=["number"]).columns.tolist()
     nums = re.findall(r"\d+(?:\.\d+)?", q_orig)
     used_num_tokens = set()
@@ -195,11 +183,9 @@ def build_smart_sql(nl_query: str, df: pd.DataFrame, table_name: str) -> str:
                 op = "="
             where_clauses.append(f'"{num_col}" {op} {target_num}')
 
-    # 4단계: 핵심 검색 키워드 추출 (따옴표 안의 단어 우선 + 한국어 조사 제거)
     quoted_words = re.findall(r"['\"“”‘’]([^'\"“”‘’]+)['\"“”‘’]", q_orig)
     keywords = [w.strip() for w in quoted_words if w.strip()]
 
-    # 따옴표가 없거나 추가 키워드가 있는 경우 토큰 분리
     q_cleaned = re.sub(r"['\"“”‘’][^'\"“”‘’]+['\"“”‘’]", " ", q_orig)
     raw_tokens = re.findall(r"[가-힣A-Za-z0-9_-]+", q_cleaned)
 
@@ -207,7 +193,6 @@ def build_smart_sql(nl_query: str, df: pd.DataFrame, table_name: str) -> str:
         tok_low = tok.lower()
         if tok in used_num_tokens or tok_low in matched_col_tokens or tok_low in NL_FILLER_WORDS:
             continue
-        # 컬럼명+조사 형태('Title칸에', '제목칸에', '라인에서') 제거
         is_col_word = False
         for c_token in matched_col_tokens:
             if tok_low.startswith(c_token):
@@ -216,7 +201,6 @@ def build_smart_sql(nl_query: str, df: pd.DataFrame, table_name: str) -> str:
         if is_col_word:
             continue
 
-        # 단어 끝에 붙은 한국어 조사/어미('배달만' -> '배달', '쿠폰이나' -> '쿠폰', '내역만' -> '내역', 'A라인랑' -> 'A라인') 제거
         stem = re.sub(
             r"(만|이나|나|이랑|랑|하고|과|와|을|를|이|가|은|는|에서|에게|으로|로|에|도|씩|들)$",
             "",
@@ -227,14 +211,12 @@ def build_smart_sql(nl_query: str, df: pd.DataFrame, table_name: str) -> str:
         if len(stem) >= 1 and stem not in keywords:
             keywords.append(stem)
 
-    # 5단계: 추출된 키워드로 SQL WHERE 조건 조립
     str_cols = df.select_dtypes(include=["object", "category"]).columns.tolist() or all_cols
     search_scope_cols = target_cols if target_cols else str_cols
 
     kw_sql_parts = []
     for kw in keywords:
         kw_safe = kw.replace("'", "''")
-        # 현재 데이터프레임의 검색 대상 컬럼 중 해당 키워드를 부분 포함(contains)하는 컬럼 탐색
         matching_cols = []
         for col in search_scope_cols:
             if df[col].astype(str).str.contains(kw, case=False, na=False, regex=False).any():
@@ -247,7 +229,6 @@ def build_smart_sql(nl_query: str, df: pd.DataFrame, table_name: str) -> str:
                 or_cols = " OR ".join(f'"{c}" LIKE \'%{kw_safe}%\'' for c in matching_cols[:4])
                 kw_sql_parts.append(f"({or_cols})")
         else:
-            # 데이터에 해당 키워드가 없더라도 절대 SELECT * 로 무시하지 않고, 지정 컬럼(또는 대표 텍스트 컬럼)에 LIKE 쿼리 생성!
             fallback_cols = target_cols if target_cols else search_scope_cols[:3]
             if len(fallback_cols) == 1:
                 kw_sql_parts.append(f'"{fallback_cols[0]}" LIKE \'%{kw_safe}%\'')
@@ -256,7 +237,6 @@ def build_smart_sql(nl_query: str, df: pd.DataFrame, table_name: str) -> str:
                 kw_sql_parts.append(f"({or_cols})")
 
     if kw_sql_parts:
-        # 여러 키워드('A라인랑 B라인', '쿠폰이나 내역')는 OR로 묶어 둘 다 조회되게 처리
         if len(kw_sql_parts) == 1:
             where_clauses.append(kw_sql_parts[0])
         else:
@@ -267,6 +247,116 @@ def build_smart_sql(nl_query: str, df: pd.DataFrame, table_name: str) -> str:
         sql += " WHERE " + " AND ".join(where_clauses)
     sql += " LIMIT 100;"
     return sql
+
+
+# =====================================================================
+# 🔄 1번 필터(예: A라인)와 3번 사용자 질문(예: B라인) 충돌 감지 및 스마트 데이터 연동기
+# =====================================================================
+def extract_question_target_df(question: str, raw_df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
+    """
+    3번 질문 문장(예: 'B라인의 생산률과 불량률을 분석해줘') 안에
+    전체 원본 데이터(raw_df)의 특정 항목값(예: 'B라인', 'C라인', '야간', '도장얼룩' 등)이 언급되었는지 스캔하여
+    해당 행 데이터와 감지된 조건 라벨을 반환합니다.
+    """
+    if not question or not question.strip() or len(raw_df) == 0:
+        return pd.DataFrame(), []
+
+    q_low = question.lower()
+    col_matches: dict[str, list[str]] = {}
+    matched_labels: list[str] = []
+
+    str_cols = raw_df.select_dtypes(include=["object", "category"]).columns.tolist()
+    for col in str_cols:
+        vals_found = []
+        for val in raw_df[col].dropna().astype(str).unique():
+            val_clean = re.sub(r"\s*\[[^\]]+\]", "", val).strip()
+            if not val_clean or val_clean == "-" or len(val_clean) > 30:
+                continue
+            if val_clean.lower() in q_low:
+                vals_found.append(val_clean)
+                matched_labels.append(f"{col}='{val_clean}'")
+        if vals_found:
+            col_matches[col] = list(dict.fromkeys(vals_found))
+
+    if not col_matches:
+        return pd.DataFrame(), []
+
+    mask = pd.Series(True, index=raw_df.index)
+    for col, vals in col_matches.items():
+        col_series = raw_df[col].astype(str).apply(lambda x: re.sub(r"\s*\[[^\]]+\]", "", x).strip())
+        mask &= col_series.isin(vals)
+
+    return raw_df[mask].copy(), list(dict.fromkeys(matched_labels))
+
+
+def resolve_analysis_scope(
+    question: str,
+    q_mode: str,
+    scope_option: str,
+    target_df: pd.DataFrame,
+    raw_df: pd.DataFrame,
+    active_filter_text: str,
+) -> tuple[pd.DataFrame, str, str]:
+    """
+    1번 조회 데이터(target_df)와 3번 사용자 질문(question)을 비교하여,
+    최종적으로 AI와 엑셀 추출기에 전달할 최적의 데이터프레임(analysis_df)과 범위 설명, 안내 메시지를 결정합니다.
+    """
+    # AI 비서 자동 질문 모드이면 1번 조회 데이터를 그대로 사용
+    if q_mode.startswith("🤖"):
+        scope_desc = active_filter_text or "1번 조회 데이터 전체"
+        return target_df, scope_desc, ""
+
+    # 사용자 직접 질문 입력 모드일 때: 질문 속에 언급된 데이터 추출
+    q_df, q_labels = extract_question_target_df(question, raw_df)
+    asks_all = any(k in question for k in ["전체 라인", "모든 라인", "전 라인", "전체 데이터", "모든 데이터", "전체 비교"])
+
+    # 질문에서 언급한 데이터가 현재 1번 표(target_df)에 없는지 확인 (예: 1번은 A라인인데 3번 질문은 B라인인 경우!)
+    is_missing_in_step1 = False
+    if len(q_df) > 0:
+        overlap_idx = target_df.index.intersection(q_df.index)
+        if len(overlap_idx) < len(q_df):
+            is_missing_in_step1 = True
+
+    if asks_all and len(target_df) < len(raw_df):
+        return (
+            raw_df,
+            "전체 원본 데이터 (3번 질문 '전체' 키워드 감지)",
+            f"💡 **[스마트 범위 확장]** 1번에서는 `{active_filter_text}`({len(target_df)}건)만 조회되어 있으나, 3번 질문에서 **전체 데이터 비교**를 요청하셔서 전체 원본(`{len(raw_df)}건`)으로 확장해 분석합니다.",
+        )
+
+    if scope_option.startswith("🔄"):
+        # [방식 1: 1번 조회 + 3번 질문 통합 비교 (기본 추천)]
+        if is_missing_in_step1 and len(q_df) > 0:
+            combined_df = pd.concat([target_df, q_df]).drop_duplicates().reset_index(drop=True)
+            q_label_str = ", ".join(q_labels)
+            notice = (
+                f"🔄 **[스마트 통합 연동 작동]** 1번 조회 조건(`{active_filter_text or '현재 표'}`)에 없는 **`{q_label_str}`** 질문이 감지되었습니다! "
+                f"원본 DB에서 **`{q_label_str}`({len(q_df)}건)** 데이터를 자동으로 추가 조회하여 **1번 데이터({len(target_df)}건) + 3번 질문 데이터({len(q_df)}건) = 총 {len(combined_df)}건**을 함께 비교·분석합니다."
+            )
+            return combined_df, f"1번 조회({active_filter_text}) + 3번 질문({q_label_str}) 통합 데이터", notice
+        return target_df, active_filter_text or "1번 조회 데이터", ""
+
+    elif scope_option.startswith("🎯"):
+        # [방식 2: 3번 질문 기준으로만 단독 분석 (1번 필터 무시)]
+        if len(q_df) > 0:
+            q_label_str = ", ".join(q_labels)
+            notice = (
+                f"🎯 **[3번 질문 단독 조회 작동]** 1번 조회 필터(`{active_filter_text or '전체'}`)와 상관없이, "
+                f"3번 질문에서 지목하신 **`{q_label_str}` ({len(q_df)}건)** 데이터만 원본 DB에서 새로 추출하여 집중 분석합니다."
+            )
+            return q_df.reset_index(drop=True), f"3번 질문 단독 조회 ({q_label_str})", notice
+        return raw_df, "전체 원본 데이터 (3번 질문 기준)", "🎯 **[3번 질문 기준]** 전체 원본 데이터를 대상으로 분석합니다."
+
+    else:
+        # [방식 3: 1번 조회 결과 표 안에서만 고정 분석]
+        warn_msg = ""
+        if is_missing_in_step1 and len(q_ labels := q_labels) > 0:
+            warn_msg = (
+                f"⚠️ **[데이터 범위 주의]** 3번 질문에서 **`{', '.join(q_labels)}`**을(를) 요청하셨지만, "
+                f"현재 설정이 `🔒 1번 조회 표 고정`이어서 **`{active_filter_text}`({len(target_df)}건)** 데이터만 AI에게 전달됩니다. "
+                f"(`B라인` 등을 분석하려면 위 옵션을 `🔄 통합 비교` 또는 `🎯 3번 질문 단독 분석`으로 선택하세요!)"
+            )
+        return target_df, active_filter_text or "1번 조회 데이터 고정", warn_msg
 
 
 def generate_smart_assistant_question(
@@ -382,7 +472,6 @@ def render_related_links_box(target_df: pd.DataFrame):
 
 
 def _classify_verification_goal(text: str) -> str:
-    """Expected Result처럼 문장이 모두 다른 열을 의미 있는 '검증 목적 유형'으로 자동 분류합니다."""
     s = str(text)
     if any(k in s for k in ["오류", "에러", "않는다", "없음", "실패", "차단", "불가"]):
         return "🚫 오류·예외 방지 및 미표시 검증"
@@ -396,11 +485,9 @@ def _classify_verification_goal(text: str) -> str:
 
 
 def _count_procedure_steps(text: str) -> str:
-    """Procedure/Test Step의 단계 수(복잡도)를 계산해 분류합니다."""
     s = str(text).strip()
     if not s or s == "-":
         return "미기재"
-    # 줄바꿈, 화살표(->, →), 번호(1., 2., PR-01) 등으로 단계 수 추정
     steps = max(
         len([l for l in s.splitlines() if l.strip()]),
         len(re.findall(r"(?:->|→|PR-\d+|\d+\.)", s)),
@@ -412,12 +499,9 @@ def _count_procedure_steps(text: str) -> str:
         return "2단계 (기본 절차)"
     if steps == 3:
         return "3단계 (중간 절차)"
-    return f"4단계 이상 (복합 절차)"
+    return "4단계 이상 (복합 절차)"
 
 
-# =====================================================================
-# 📊 스마트 다차원 시각화: 1건씩 쪼개지는 현상 방지 + 긴 문장 가로 막대 & 폰트 확대!
-# =====================================================================
 def render_smart_charts(target_df: pd.DataFrame, key_prefix: str = "main"):
     if len(target_df) == 0:
         st.info("조회된 데이터가 없습니다.")
@@ -426,7 +510,6 @@ def render_smart_charts(target_df: pd.DataFrame, key_prefix: str = "main"):
     num_cols = target_df.select_dtypes(include=["number"]).columns.tolist()
     all_cols = target_df.columns.tolist()
 
-    # [모드 A] 제조·수치형 데이터
     if num_cols and ("생산량" in num_cols or "불량수" in num_cols):
         cat_cols = target_df.select_dtypes(include=["object", "category"]).columns.tolist()
         line_col = "라인" if "라인" in all_cols else ("생산라인" if "생산라인" in all_cols else (cat_cols[0] if cat_cols else all_cols[0]))
@@ -487,10 +570,6 @@ def render_smart_charts(target_df: pd.DataFrame, key_prefix: str = "main"):
                 st.plotly_chart(fig4, use_container_width=True, key=f"{key_prefix}_num4")
         return
 
-    # =========================================================================
-    # [모드 B] TC / 검증 시트 및 범주형 문서 전용 시각화
-    # (Title 1건씩 쪼개짐 방지 -> 유사 키워드 그룹핑! / 긴 문장 -> 가로형 막대 & 요약 라벨!)
-    # =========================================================================
     clean_df = target_df.copy()
     for c in clean_df.columns:
         clean_df[c] = clean_df[c].astype(str).apply(lambda x: re.sub(r"\s*\[[^\]]+\]", "", x).strip())
@@ -507,7 +586,6 @@ def render_smart_charts(target_df: pd.DataFrame, key_prefix: str = "main"):
 
     r1_c1, r1_c2 = st.columns(2)
 
-    # [차트 1] Title(또는 Category) 유사 주제 키워드 자동 그룹핑 차트 (1건씩 나뉘지 않고 '문서', '검색', '목차' 등으로 합산!)
     with r1_c1:
         target_c1 = cat_col if (cat_col and clean_df[cat_col].nunique() <= 12) else (title_col or all_cols[min(1, len(all_cols) - 1)])
         grouped_c1 = cluster_text_series_by_topic(clean_df[target_c1], max_groups=8)
@@ -533,7 +611,6 @@ def render_smart_charts(target_df: pd.DataFrame, key_prefix: str = "main"):
             )
             st.plotly_chart(fig_c1, use_container_width=True, key=f"{key_prefix}_cat1")
 
-    # [차트 2] 실제 판정 상태(Pass/Fail/Not Run)가 있으면 표시하고, 없으면 Expected Result를 '검증 목적 유형'으로 묶어 표시!
     with r1_c2:
         if real_status_col and clean_df[real_status_col].nunique() <= 10:
             vc_st = clean_df[real_status_col].value_counts().reset_index()
@@ -547,7 +624,6 @@ def render_smart_charts(target_df: pd.DataFrame, key_prefix: str = "main"):
             fig_c2.update_layout(height=440, font=dict(size=13))
             st.plotly_chart(fig_c2, use_container_width=True, key=f"{key_prefix}_cat2")
         elif exp_col:
-            # Expected Result의 긴 문장들을 1건씩 쪼개지 않고 '검증 목적 유형'으로 스마트 분류!
             goal_series = clean_df[exp_col].apply(_classify_verification_goal)
             vc_goal = goal_series.value_counts().reset_index()
             vc_goal.columns = ["검증 목적 유형", "건수"]
@@ -562,7 +638,6 @@ def render_smart_charts(target_df: pd.DataFrame, key_prefix: str = "main"):
 
     r2_c1, r2_c2 = st.columns(2)
 
-    # [차트 3] Precondition(사전조건) 등 긴 문장 컬럼 -> 깔끔한 축약 라벨 + 가로형 막대그래프(Horizontal Bar)로 가독성 해결!
     with r2_c1:
         color_ctx_df = analyze_color_cell_contexts(target_df)
         if len(color_ctx_df) > 0:
@@ -582,7 +657,6 @@ def render_smart_charts(target_df: pd.DataFrame, key_prefix: str = "main"):
             vc_pre["비중(%)"] = (vc_pre["건수"] / len(clean_df) * 100).round(1)
             vc_pre["요약_라벨"] = vc_pre["원문_사전조건"].apply(lambda x: shorten_long_label(x, max_len=28))
             vc_pre["표시라벨"] = vc_pre.apply(lambda r: f"{r['건수']}건 ({r['비중(%)']}%)", axis=1)
-            # 긴 문장이 아래로 깔려 그래프가 찌그러지지 않도록 가로형(orientation='h') 막대로 표시!
             fig_c3 = px.bar(
                 vc_pre.iloc[::-1],
                 x="건수",
@@ -605,7 +679,6 @@ def render_smart_charts(target_df: pd.DataFrame, key_prefix: str = "main"):
             )
             st.plotly_chart(fig_c3, use_container_width=True, key=f"{key_prefix}_cat3")
 
-    # [차트 4] 테스트 절차(Procedure/Step) 단계 복잡도 분포 또는 교차 분포
     with r2_c2:
         if proc_col:
             step_series = clean_df[proc_col].apply(_count_procedure_steps)
@@ -630,11 +703,11 @@ def render_smart_charts(target_df: pd.DataFrame, key_prefix: str = "main"):
 @st.dialog("📊 AI 모델별 상세 시각화 대시보드 & 인사이트 리포트", width="large")
 def show_model_visual_popup(m_code: str, res_data: dict, target_df: pd.DataFrame):
     st.markdown(f"## {MODEL_LABELS.get(m_code, m_code)}")
-    st.caption(f"⏱️ 분석 소요 시간: **{res_data['elapsed_time']}초** | 핵심 분석 데이터: **{len(target_df)}건**")
+    st.caption(f"⏱️ 분석 소요 시간: **{res_data['elapsed_time']}초** | 분석 반영 데이터: **{len(target_df)}건**")
 
     color_df = analyze_color_cell_contexts(target_df)
     k1, k2, k3, k4 = st.columns(4)
-    k1.metric("핵심 데이터 건수", f"{len(target_df):,} 건")
+    k1.metric("분석 반영 건수", f"{len(target_df):,} 건")
     k2.metric("분석 컬럼 수", f"{len(target_df.columns)} 개")
     k3.metric("🎨 색상강조 셀 감지", f"{len(color_df):,} 건")
     k4.metric("AI 응답 속도", f"{res_data['elapsed_time']} 초")
@@ -683,7 +756,6 @@ def render_visualization_fragment(target_df: pd.DataFrame, aux_sheets: dict[str,
             chart_dir = c3.selectbox("차트 방향 (긴 문장은 가로형 추천)", options=["자동 선택 (긴 문장 가로형)", "세로 막대형 (Vertical)", "가로 막대형 (Horizontal)"], key="frag_dir")
             use_topic_cluster = c4.checkbox("🧩 유사 키워드로 묶어서 보기 (1건씩 쪼개질 때 체크)", value=("title" in x_col.lower()), key="frag_cluster")
 
-            # 유사 키워드 클러스터링 적용 여부
             if use_topic_cluster and y_sel == "(건수 집계 - COUNT)":
                 clustered = cluster_text_series_by_topic(target_df[x_col], max_groups=10)
                 if len(clustered) > 0:
@@ -771,6 +843,7 @@ def render_visualization_fragment(target_df: pd.DataFrame, aux_sheets: dict[str,
 @st.fragment
 def render_agent_analysis_fragment(
     target_df: pd.DataFrame,
+    raw_df: pd.DataFrame,
     aux_sheets: dict[str, pd.DataFrame] | None,
     summary_df: pd.DataFrame,
     selected_models: list[str],
@@ -783,41 +856,79 @@ def render_agent_analysis_fragment(
     q_mode = st.radio(
         "🤖 질문 생성 방식 선택",
         options=[
-            "🤖 AI 비서 자동 맞춤 질문 (유사 주제 그룹핑 + 보조 시트 + 색상 문맥 자동 조합)",
-            "✍️ 사용자 직접 질문 입력/수정",
+            "🤖 AI 비서 자동 맞춤 질문 (1번 조회 데이터·주제 묶음·색상 문맥 자동 조합)",
+            "✍️ 사용자 직접 질문 입력/수정 (다른 라인·조건 질문 시 자동 데이터 연동 지원)",
         ],
         horizontal=True,
     )
 
     if q_mode.startswith("🤖"):
-        st.info(f"**💡 AI 비서가 현재 조회 데이터({len(target_df)}건)의 주제 묶음과 구성을 분석해 조합한 질문입니다:**\n\n{auto_assistant_q}")
+        st.info(f"**💡 AI 비서가 현재 1번에서 조회된 데이터({len(target_df)}건)에 맞춰 조합한 분석 질문입니다:**\n\n{auto_assistant_q}")
         question = auto_assistant_q
+        scope_option = "🔒 1번 조회 표 고정"
     else:
-        question = st.text_input("💡 에이전트에게 지시할 분석 질문을 입력하세요:", value=auto_assistant_q)
+        question = st.text_input(
+            "💡 에이전트에게 지시할 분석 질문을 자유롭게 입력하세요 (예: 'B라인의 생산량과 불량률을 분석해서 알려줘'):",
+            value="B라인의 생산량과 불량률을 분석해서 알려줘" if "라인" in raw_df.columns else auto_assistant_q,
+        )
+        scope_option = st.radio(
+            "🔎 [직접 질문 시] 데이터 분석 범위 연동 방식 선택:",
+            options=[
+                "🔄 스마트 통합 비교 (1번 조회 데이터 + 3번 질문 대상 데이터를 합쳐서 비교·분석 · 추천)",
+                "🎯 3번 질문 대상만 단독 분석 (1번 필터 무시하고 질문한 대상만 원본 DB에서 새로 조회)",
+                "🔒 1번 조회된 표 데이터 안에서만 고정 분석",
+            ],
+            index=0,
+            horizontal=True,
+        )
 
-    render_related_links_box(target_df)
+    # 1번 조회 데이터(예: A라인)와 3번 질문(예: B라인)을 스마트하게 연동하여 실제 분석할 데이터프레임 확정
+    analysis_df, resolved_scope_desc, scope_notice = resolve_analysis_scope(
+        question, q_mode, scope_option, target_df, raw_df, active_filter_text
+    )
+
+    if scope_notice:
+        if scope_notice.startswith("⚠️"):
+            st.warning(scope_notice)
+        else:
+            st.success(scope_notice)
+
+    render_related_links_box(analysis_df)
 
     if st.button("🚀 에이전트 정밀 분석 실행 (선택 모델 동시 병렬 실행)", type="primary"):
         if not selected_models:
             st.warning("좌측 사이드바에서 최소 1개 이상의 모델을 선택해주세요.")
         else:
             agent_app = build_agent_graph()
-            stat_tables = build_korean_stat_tables(target_df, aux_sheets=aux_sheets)
+            # 확정된 analysis_df(예: A라인+B라인 통합 또는 B라인 단독)로 집계표 생성!
+            stat_tables = build_korean_stat_tables(analysis_df, aux_sheets=aux_sheets)
             stat_summary_str = "\n\n".join(
                 f"■ {k}\n{v.to_string(index=False)}" for k, v in stat_tables.items()
             )
-            sample_rows_df = target_df.head(35)
+            # 전체 원본 데이터의 요약도 배경 참고용으로 함께 제공하여 AI가 전체 맥락 속에서 정확히 비교하도록 지원
+            raw_overview_tables = build_korean_stat_tables(raw_df, aux_sheets=None)
+            raw_overview_str = "\n".join(
+                f"• {k}:\n{v.to_string(index=False)}" for k, v in list(raw_overview_tables.items())[:2]
+            )
+
+            sample_rows_df = analysis_df.head(35)
             data_info = (
-                f"[조회 조건]: {active_filter_text or '핵심 데이터 시트 전체'}\n"
-                f"[핵심 분석 대상 건수]: {len(target_df)}건\n"
+                f"[분석 적용 범위]: {resolved_scope_desc}\n"
+                f"[분석 대상 건수]: {len(analysis_df)}건 (전체 원본 {len(raw_df)}건)\n"
                 f"[보조 시트 목록]: {list(aux_sheets.keys()) if aux_sheets else '없음'}\n"
-                f"[컬럼 목록]: {list(target_df.columns)}\n\n"
-                f"[파이썬 정밀 집계 및 주제 그룹핑 요약표]\n{stat_summary_str}\n\n"
-                f"[핵심 데이터 상세 행 내역]\n{sample_rows_df.to_string(index=False)}"
+                f"[컬럼 목록]: {list(analysis_df.columns)}\n\n"
+                f"[1. 분석 대상 정밀 집계표 ({resolved_scope_desc})]\n{stat_summary_str}\n\n"
+                f"[2. 참고용 전체 원본 데이터 요약 (타 라인/항목 비교 기준)]\n{raw_overview_str}\n\n"
+                f"[3. 분석 대상 상세 행 내역]\n{sample_rows_df.to_string(index=False)}"
             )
 
             new_results = {}
-            status_box = st.status("⚡ 선택한 AI 모델들을 동시에 병렬 실행하고 있습니다...", expanded=True)
+            status_box = st.status(
+                f"⚡ [{resolved_scope_desc} ({len(analysis_df)}건)] 기준으로 AI 모델들을 동시에 병렬 실행하고 있습니다...",
+                expanded=True,
+            )
+
+            analysis_summary_df = analysis_df.describe(include="all").fillna("")
 
             def _run_single_model(m_code: str):
                 res = agent_app.invoke({
@@ -828,8 +939,9 @@ def render_agent_analysis_fragment(
                     "report": "",
                     "elapsed_time": 0.0,
                 })
+                # 엑셀 추출 시에도 3번 질문에 맞춰 확정된 analysis_df가 2번·3번 시트에 들어가도록 연동!
                 excel_bytes = export_analysis_to_excel(
-                    target_df, summary_df, res["report"], res["elapsed_time"], m_code, aux_sheets=aux_sheets
+                    analysis_df, analysis_summary_df, res["report"], res["elapsed_time"], m_code, aux_sheets=aux_sheets
                 )
                 res["excel_bytes"] = excel_bytes
                 return m_code, res
@@ -841,14 +953,14 @@ def render_agent_analysis_fragment(
                     new_results[m_done] = res_done
                     status_box.write(f"✅ **{MODEL_LABELS.get(m_done, m_done)}** 분석 완료! (`{res_done['elapsed_time']}초`)")
 
-            status_box.update(label="🎉 모든 모델 분석 완료!", state="complete", expanded=False)
+            status_box.update(label=f"🎉 모든 모델 분석 완료! (반영 데이터: {resolved_scope_desc}, 총 {len(analysis_df)}건)", state="complete", expanded=False)
             st.session_state["saved_results"] = new_results
-            st.session_state["last_analyzed_df"] = target_df
+            st.session_state["last_analyzed_df"] = analysis_df
 
     saved = st.session_state.get("saved_results", {})
     if saved:
         display_models = [m for m in selected_models if m in saved] or list(saved.keys())
-        popup_df = st.session_state.get("last_analyzed_df") if st.session_state.get("last_analyzed_df") is not None else target_df
+        popup_df = st.session_state.get("last_analyzed_df") if st.session_state.get("last_analyzed_df") is not None else analysis_df
 
         st.markdown("##### ⚖️ AI 모델별 성능(응답 속도) 및 핵심 진단 한눈에 비교")
         matrix_rows = []
@@ -868,10 +980,10 @@ def render_agent_analysis_fragment(
         combined_excel_bytes = export_combined_analysis_to_excel(popup_df, saved, MODEL_LABELS, aux_sheets=aux_sheets)
         top_c1, top_c2 = st.columns([2, 1])
         with top_c1:
-            st.caption("👆 **각 모델의 제목 버튼을 클릭하면 상세 다차원 시각화 팝업창이 열립니다.**")
+            st.caption("👆 **각 모델의 제목 버튼을 클릭하면 분석에 반영된 데이터 기준의 시각화 팝업창이 열립니다.**")
         with top_c2:
             st.download_button(
-                label="📚 전체 모델 종합 비교 엑셀 추출 (주제그룹핑·차트 완비 .xlsx)",
+                label="📚 전체 모델 종합 비교 엑셀 추출 (질문 연동 데이터·차트 완비 .xlsx)",
                 data=combined_excel_bytes,
                 file_name="report_ALL_models_combined.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -891,7 +1003,7 @@ def render_agent_analysis_fragment(
                 st.markdown(res_item["report"])
 
                 st.download_button(
-                    label=f"📥 {m_code} 개별 엑셀 추출 (주제그룹핑·차트 포함 .xlsx)",
+                    label=f"📥 {m_code} 개별 엑셀 추출 (질문 연동 데이터·차트 포함 .xlsx)",
                     data=res_item["excel_bytes"],
                     file_name=f"report_{m_code}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -985,7 +1097,7 @@ if uploaded_file is not None:
     with tab_nl:
         st.caption(
             f"테이블(`{TABLE_NAME}`) 컬럼: `{list(raw_df.columns)}` | "
-            "입력 예시: **'Title칸에 문서 들어간거 조회해줘'**, **'목차이나 검색 조회해줘'**, **'배달만 조회해줘'**, **'쿠폰이나 내역 조회'**"
+            "입력 예시: **'Title칸에 문서 들어간거 조회해줘'**, **'목차이나 검색 조회해줘'**, **'배달만 조회해줘'**, **'A라인랑 B라인 조회'**"
         )
         nl_question = st.text_input("조회 조건을 자연어로 입력하세요 (특정 컬럼 지정 및 부분 단어 검색 지원):", value="")
         auto_sql = build_smart_sql(nl_question, raw_df, TABLE_NAME)
@@ -1008,7 +1120,7 @@ if uploaded_file is not None:
 
     with tab_kw:
         c1, c2 = st.columns([3, 1])
-        kw_input = c1.text_input("검색 키워드 입력 (쉼표 `,` 구분, 예: `문서, 목차` 또는 `배달, 쿠폰`)", value="")
+        kw_input = c1.text_input("검색 키워드 입력 (쉼표 `,` 구분, 예: `문서, 목차` 또는 `A라인, B라인`)", value="")
         match_type = c2.radio("조건", options=["OR (하나라도 포함)", "AND (모두 포함)"], horizontal=True)
         if kw_input.strip():
             df = filter_by_keywords(raw_df, kw_input, match_all=match_type.startswith("AND"))
@@ -1053,4 +1165,4 @@ if uploaded_file is not None:
 
     render_visualization_fragment(target_df, aux_sheets)
     st.divider()
-    render_agent_analysis_fragment(target_df, aux_sheets, summary_df, selected_models, active_filter_text)
+    render_agent_analysis_fragment(target_df, raw_df, aux_sheets, summary_df, selected_models, active_filter_text)
