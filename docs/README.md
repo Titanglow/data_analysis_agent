@@ -1,38 +1,58 @@
-# 📊 자연어 기반 사내 데이터 분석 AI Agent (`data_analysis_agent`)
+# 📊 자연어 기반 사내 데이터·문서 통합 분석 AI Agent (`data_analysis_agent`)
 
-사내 생산·품질·검증 데이터(CSV, 다중 시트 Excel)를 업로드하면 
-① 핵심 데이터 시트와 요약/환경 보조 시트를 스마트 분리하여 로컬 SQLite DB를 자동 구축하고, 
-② 한국어 자연어 질문으로 특정 컬럼/부분 키워드 SQL 조회 및 유사 주제 클러스터링 다차원 시각화를 수행하며, 
-③ 사내 보안용 Local LLM(Ollama 정밀 모드)과 외부 Cloud AI(Groq, Gemini)를 동시에 병렬 비교하여 차트가 포함된 마스터 엑셀 리포트(.xlsx) 및 SQL 덤프(.sql)를 자동 생성하는 실무형 AI 에이전트입니다.
+사내 생산·품질·검증 데이터(**CSV, 다중 시트 Excel**)뿐만 아니라 일반 업무 문서(**Word `.docx`, `.txt`, `.md`**)를 업로드하면 **① 핵심 데이터와 보조 시트/내장 표를 스마트 분리하여 로컬 SQLite DB를 자동 구축**하고, **② 한국어 자연어로 SQL 조회 및 한눈에 보는 TOP 순위 시각화**를 수행하며, **③ 사내 보안용 Local LLM(Ollama 정밀 모드)과 외부 Cloud AI(Groq, Gemini)를 동시에 병렬 비교하여 마스터 엑셀 리포트(`.xlsx`) 및 SQL 덤프(`.sql`)를 자동 생성**하는 실무형 AI 에이전트입니다.
 
 ---
 
-## 📁 프로젝트 폴더 및 파일 구조 (Project Structure)
+## 🔄 1. 한눈에 보는 파이썬(`.py`) 파일 간 실행 흐름도 (Architecture Flow)
 
-```text
-data_analysis_agent/
-├── .streamlit/
-│   └── config.toml              # 에메랄드 그린(#059669) UI 테마 자동 설정
-├── data_agent/                  # AI 에이전트 핵심 코어 패키지
-│   ├── __init__.py
-│   ├── config.py                # 사내 품질 기준 및 공통 설정 관리 (W47 분리 예정)
-│   ├── state.py                 # LangGraph 상태(State) 스키마 정의 (W47 분리 예정)
-│   ├── llm.py                   # 멀티 LLM 라우터 (Ollama 정밀 3,500토큰, Groq/Gemini 자동탐색)
-│   ├── graph.py                 # LangGraph 워크플로우 (START -> analyzer -> reporter -> END)
-│   ├── excel_exporter.py        # 유사 제목 클러스터링, 색상 문맥 해석, BarChart 내장 엑셀 추출기
-│   ├── nodes/                   # LangGraph 작업자 노드 모듈
-│   │   ├── analyzer_node.py     # [1단계] 파이썬 고속 정밀 집계 및 이상 징후·색상 문맥 추출 노드
-│   │   └── reporter_node.py     # [2단계] 도메인 맞춤(공정/TC) 4단락 보고서 생성 및 마크다운 보정 노드
-│   └── tools/                   # 데이터 처리 및 시각화 도구 모듈
-│       ├── data_loader.py       # 다중 시트 분리, 셀 배경색 추출, SQLite 동기화 및 .sql 덤프 생성기
-│       └── visualizer.py        # 다차원 시각화 보조 모듈 (W47 분리 예정)
-├── docs/                        # 주차별 개발 진행 보고서 및 문서 보관소
-│   ├── README.md                # 프로젝트 구조 및 핵심 기능 안내 문서
-│   └── W46_progress.md          # W46 주차 개발 실적 및 기술 고도화 리포트
-├── app.py                       # Streamlit 메인 대시보드 (자연어 SQL, 주제 묶음 차트, AI 비서, 뉴스 연동)
-├── main.py                      # CLI 터미널 단독 테스트용 실행 파일
-├── run.bat                      # 윈도우 원클릭 가상환경 활성화 및 대시보드 실행 배치 파일
-├── sample_data.csv              # 다차원 공정 샘플 데이터 (일자·주차·시간대·라인·불량유형 포함)
-├── requirements.txt             # 필수 Python 패키지 목록
-├── .env.example                 # 환경변수 설정 템플릿 (실제 키는 .env에 보관 및 Git 제외)
-└── .gitignore                   # 보안 파일(.env, .venv, *.db) GitHub 업로드 차단 규칙
+> 💡 GitHub에서 이 문서를 열면 아래 다이어그램이 **자동으로 화살표 그래프**로 표시됩니다.
+
+```mermaid
+flowchart TB
+    User(["👤 사용자 (웹 브라우저)"])
+
+    subgraph UI["🖥️ 1. 메인 화면 계층 (app.py)"]
+        Upload["📂 파일 업로드 & 자연어 질문 입력"]
+        NL2SQL["🤖 build_smart_sql()<br/>(자연어 → SQL 자동 변환)"]
+        Charts["📊 render_smart_charts()<br/>(4대 KPI 카드 & 가로 TOP 순위 차트)"]
+        Scope["🔄 resolve_analysis_scope()<br/>(1번 조회 + 3번 질문 스마트 연동)"]
+    end
+
+    subgraph Loader["🗄️ 2. 데이터·문서 추출 및 DB 계층 (data_agent/tools/data_loader.py)"]
+        Parse["📄 다중 포맷 파서<br/>(CSV / 다중시트 .xlsx / Word .docx / .txt)"]
+        SQLite[("💾 internal_analysis.db<br/>(SQLite 자동 동기화 & .sql 덤프)")]
+    end
+
+    subgraph Graph["🧠 3. LangGraph 워크플로우 엔진 (data_agent/graph.py)"]
+        Start(("START"))
+        Analyzer["⚙️ analyzer_node.py<br/>[1단계: 파이썬 고속 집계 노드]<br/>시트요약 · 색상문맥 · 이상치 0.01초 추출"]
+        Reporter["📝 reporter_node.py<br/>[2단계: 도메인 맞춤 보고서 노드]<br/>IF/ELSE 판정 배너 + 4단락 리포트 완성"]
+        EndNode(("END"))
+    end
+
+    subgraph LLMs["⚡ 4. 멀티 LLM 병렬 라우터 (data_agent/llm.py)"]
+        Ollama["🔒 Local: Ollama<br/>(사내보안 정밀 모드)"]
+        Groq["⚡ Cloud: Groq<br/>(초고속 무료 API)"]
+        Gemini["☁️ Cloud: Gemini<br/>(Google 무료 API)"]
+    end
+
+    subgraph Exporter["📥 5. 리포트·차트 패키징 계층 (data_agent/excel_exporter.py)"]
+        StatTables["📋 build_korean_stat_tables()<br/>(유사 제목 클러스터링 & 한글 통계표)"]
+        ExcelOut["📚 마스터 엑셀 추출 (.xlsx)<br/>(모델별 종합비교 + 시트통합요약 + BarChart)"]
+    end
+
+    User --> Upload
+    Upload --> Parse
+    Parse --> SQLite
+    SQLite --> NL2SQL
+    NL2SQL --> Charts
+    Charts --> StatTables
+    NL2SQL --> Scope
+    Scope --> Start
+    Start --> Analyzer
+    Analyzer --> Reporter
+    Reporter --> Ollama & Groq & Gemini
+    Ollama & Groq & Gemini --> EndNode
+    EndNode --> ExcelOut
+    ExcelOut --> User
