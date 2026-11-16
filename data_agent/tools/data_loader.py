@@ -16,6 +16,26 @@ AUX_SHEET_KEYWORDS = [
     "설명", "info", "guide", "가이드", "목차", "history", "이력", "변경이력", "coverage"
 ]
 
+# TC 절차서/명세서의 긴 설명 컬럼 목록 (단순 양식 배경색을 불합격/강조로 오판하지 않도록 보호)
+SPEC_TEXT_COLUMNS = {
+    "procedure", "pass/fail criteria", "pre-condition", "precondition",
+    "post-condition", "postcondition", "description", "purpose", "inputdata",
+    "input data", "expected result", "test step", "steps", "title", "_polarion"
+}
+
+
+def clean_polarion_xml_text(text: str) -> str:
+    """
+    사내 Polarion / ALM 엑셀 내보내기 파일에 포함된 '_x000D_', '_x000A_' 개행 기호와
+    '##################'` 같은 불필요한 구분선을 깔끔하게 정제합니다.
+    """
+    if not text or not isinstance(text, str):
+        return str(text or "")
+    s = re.sub(r"(_x000[dDaA9]_)+", " ", text)
+    s = re.sub(r"[#=*]{5,}", " | ", s)
+    s = re.sub(r"\s{2,}", " ", s).strip()
+    return s
+
 
 def _classify_rgb_color(rgb_hex: str) -> str | None:
     """셀 배경색을 선입견 없이 순수 시각적 강조 태그로 반환합니다."""
@@ -37,7 +57,7 @@ def _classify_rgb_color(rgb_hex: str) -> str | None:
 
     if r > 240 and g > 240 and b > 240:
         return None
-    if abs(r - g) < 12 and abs(r - b) < 12 and r > 210:
+    if abs(r - g) < 12 and abs(g - b) < 12 and r > 210:
         return None
 
     if r > 180 and g < 130 and b < 130:
@@ -56,7 +76,7 @@ def _classify_rgb_color(rgb_hex: str) -> str | None:
 
 
 def _read_excel_sheet_with_colors(wb: openpyxl.Workbook, sheet_name: str) -> pd.DataFrame:
-    """시트의 셀 값과 배경색 강조 태그를 읽어 DataFrame으로 변환합니다."""
+    """시트의 셀 값(Polarion _x000D_ 정제 포함)과 의미 있는 배경색 강조 태그를 읽어 DataFrame으로 변환합니다."""
     ws = wb[sheet_name]
     rows_data = []
 
@@ -65,7 +85,7 @@ def _read_excel_sheet_with_colors(wb: openpyxl.Workbook, sheet_name: str) -> pd.
         has_any_content = False
         for cell in row:
             raw_val = cell.value
-            val_str = "" if raw_val is None else str(raw_val).strip()
+            val_str = "" if raw_val is None else clean_polarion_xml_text(str(raw_val))
             if val_str.lower() in ("none", "nan", "null"):
                 val_str = ""
 
@@ -79,7 +99,11 @@ def _read_excel_sheet_with_colors(wb: openpyxl.Workbook, sheet_name: str) -> pd.
                         color_tag = _classify_rgb_color(rgb_val)
 
             if val_str and color_tag:
-                final_val = val_str if cell.row == 1 else f"{val_str} [{color_tag}]"
+                # 긴 절차서 문장(80자 이상)은 단순 서식 배경색일 수 있으므로 색상 태그 부착 제외
+                if cell.row == 1 or len(val_str) > 80:
+                    final_val = val_str
+                else:
+                    final_val = f"{val_str} [{color_tag}]"
                 has_any_content = True
             elif not val_str and color_tag:
                 final_val = f"[빈칸·{color_tag}]"
@@ -109,7 +133,7 @@ def _read_excel_sheet_with_colors(wb: openpyxl.Workbook, sheet_name: str) -> pd.
     headers = []
     seen = {}
     for idx, h in enumerate(raw_headers):
-        h_clean = re.sub(r"\s*\[🎨[^\]]+\]", "", str(h or "")).strip()
+        h_clean = re.sub(r"\s*\[🎨[^\]]+\]", "", clean_polarion_xml_text(str(h or ""))).strip()
         h_name = h_clean if h_clean else f"항목_{idx + 1}"
         if h_name in seen:
             seen[h_name] += 1
@@ -120,6 +144,11 @@ def _read_excel_sheet_with_colors(wb: openpyxl.Workbook, sheet_name: str) -> pd.
 
     df = pd.DataFrame(rows_data[header_idx + 1 :], columns=headers)
     df = df.dropna(how="all", axis=1).dropna(how="all", axis=0)
+
+    # 절차/설명 전용 컬럼(Procedure, PASS/FAIL Criteria 등)에 붙은 불필요한 배경색 태그 제거
+    for col in df.columns:
+        if col.lower().strip() in SPEC_TEXT_COLUMNS:
+            df[col] = df[col].astype(str).apply(lambda x: re.sub(r"\s*\[🎨[^\]]+\]", "", x).strip())
 
     for col in df.columns:
         try:
@@ -138,10 +167,7 @@ def _read_excel_sheet_with_colors(wb: openpyxl.Workbook, sheet_name: str) -> pd.
 def _parse_docx_bytes(
     file_bytes: bytes, selected_sheet: str = "AUTO_MAIN"
 ) -> tuple[pd.DataFrame, list[str], dict[str, int], dict[str, pd.DataFrame]]:
-    """
-    Word(.docx) 문서에서 본문 문단(목차/섹션별 자동 분류)과 문서 내 모든 표(Table)를 추출하여
-    SQLite DB 조회, 차트 시각화, AI 리포트 생성이 가능하도록 정형 테이블로 변환합니다.
-    """
+    """Word(.docx) 문서에서 본문 문단과 문서 내 표(Table)를 추출하여 정형 테이블로 변환합니다."""
     ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
     with zipfile.ZipFile(io.BytesIO(file_bytes)) as z:
         xml_content = z.read("word/document.xml")
@@ -155,7 +181,7 @@ def _parse_docx_bytes(
     if body is not None:
         for p in body.findall("w:p", ns):
             texts = [t.text for t in p.findall(".//w:t", ns) if t.text]
-            full_text = " ".join("".join(texts).split()).strip()
+            full_text = clean_polarion_xml_text(" ".join("".join(texts).split()))
             if not full_text:
                 continue
 
@@ -174,7 +200,7 @@ def _parse_docx_bytes(
                 continue
 
             para_idx += 1
-            if any(k in full_text for k in ["불량", "오류", "에러", "문제", "실패", "FAIL", "주의", "미흡", "지연", "초과", "위험", "개선"]):
+            if any(k in full_text for k in ["불량", "오류", "에러", "문제", "실패", "주의", "미흡", "지연", "초과", "위험", "개선"]):
                 status_tag = "🚨 중점/이슈 사항"
             elif any(k in full_text for k in ["완료", "성공", "정상", "PASS", "달성", "양호", "확보"]):
                 status_tag = "✅ 완료/양호 사항"
@@ -197,7 +223,7 @@ def _parse_docx_bytes(
                 row_cells = []
                 for tc in tr.findall("w:tc", ns):
                     cell_texts = [t.text for t in tc.findall(".//w:t", ns) if t.text]
-                    row_cells.append(" ".join("".join(cell_texts).split()).strip() or "-")
+                    row_cells.append(clean_polarion_xml_text(" ".join("".join(cell_texts).split())) or "-")
                 if any(c != "-" for c in row_cells):
                     t_rows.append(row_cells)
             if len(t_rows) >= 2:
@@ -261,7 +287,7 @@ def _parse_text_bytes(
     current_sec = "문서 시작부"
     idx = 0
     for raw_line in text.splitlines():
-        line = raw_line.strip()
+        line = clean_polarion_xml_text(raw_line)
         if not line or re.match(r"^[=\-*_#\s]+$", line):
             continue
         if line.startswith("#") or (len(line) <= 45 and re.match(r"^(?:\d+\.|\[|■|▶)", line)):
@@ -294,10 +320,6 @@ def _is_aux_sheet(sheet_name: str, df: pd.DataFrame) -> bool:
 def load_and_sync_to_db(
     uploaded_file, selected_sheet: str = "AUTO_MAIN"
 ) -> tuple[pd.DataFrame, list[str], dict[str, int], dict[str, pd.DataFrame]]:
-    """
-    CSV, 다중 시트 Excel(.xlsx), Word 문서(.docx), 텍스트/마크다운(.txt, .md) 파일을 모두 지원하며,
-    즉시 로컬 SQLite DB(internal_analysis.db) 테이블로 동기화합니다.
-    """
     uploaded_file.seek(0)
     file_bytes = uploaded_file.read()
     fname_lower = uploaded_file.name.lower()
@@ -312,7 +334,7 @@ def load_and_sync_to_db(
         except UnicodeDecodeError:
             df = pd.read_csv(io.BytesIO(file_bytes), encoding="cp949")
         for col in df.select_dtypes(include=["object"]).columns:
-            df[col] = df[col].fillna("-").astype(str).replace({"None": "-", "nan": "-"})
+            df[col] = df[col].fillna("-").astype(str).apply(clean_polarion_xml_text).replace({"None": "-", "nan": "-", "": "-"})
         sheet_counts["단일시트(CSV)"] = len(df)
 
     elif fname_lower.endswith(".docx"):
