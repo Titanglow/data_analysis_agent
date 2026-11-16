@@ -8,20 +8,31 @@ from openpyxl.utils import get_column_letter
 from openpyxl.chart import BarChart, Reference
 
 
-# 제목/문장 클러스터링 시 제외할 일반 동사·조사·형용사 불용어
+# 제목/문장 클러스터링 시 제외할 한국어 및 영어 일반 동사·전치사·관사 불용어
 TOPIC_STOPWORDS = {
+    # 한국어 일반 불용어
     "조회", "확인", "이동", "검증", "테스트", "기능", "동작", "표시", "출력", "입력",
     "선택", "클릭", "버튼", "화면", "상태", "경우", "정상", "여부", "시나리오", "항목",
     "있음", "없음", "한다", "된다", "이다", "에서", "으로", "에게", "대한", "통해",
     "후", "전", "시", "및", "등", "수", "값", "창", "란", "키", "키로", "다른", "이전",
+    # 영문 TC 제목 일반 동사/전치사/관사 불용어 (Verify, Check, Support, to, for 등이 주제로 잡히지 않도록 완벽 배제!)
+    "verify", "check", "checks", "support", "supports", "test", "testing", "case", "cases",
+    "that", "this", "with", "from", "into", "when", "where", "which", "while", "whether",
+    "using", "used", "use", "able", "shall", "should", "must", "will", "would", "could",
+    "can", "cannot", "does", "done", "make", "made", "have", "has", "had", "been", "being",
+    "for", "and", "the", "are", "was", "were", "not", "all", "any", "each", "every", "other",
+    "between", "after", "before", "during", "under", "over", "about", "against", "through",
+    "normal", "normally", "properly", "correctly", "valid", "invalid", "basic", "function",
+    "functionality", "operation", "process", "system", "module", "mode", "data", "value",
+    "status", "state", "result", "info", "information", "checkif", "verifythat", "to", "in",
+    "on", "of", "at", "by", "as", "is", "be", "or", "if", "it", "an", "no", "up", "out",
 }
 
 
 def cluster_text_series_by_topic(series: pd.Series, max_groups: int = 8) -> pd.DataFrame:
     """
-    'Title'처럼 각 행이 1건씩 모두 다른 문장일 때,
-    공통으로 반복 등장하는 핵심 키워드(예: '문서', '목차', '검색', '대문', '배달', '쿠폰')를 자동 추출하여
-    의미 있는 주제 그룹으로 묶고 건수·비중(%)·포함 항목 예시를 반환합니다.
+    'Title'처럼 각 행이 다른 문장일 때 일반 동사(Verify, Check, 조회, 확인)나 전치사(to, for)를 제외하고,
+    실제 기술/업무 핵심 명사(예: Codec, Audio, Display, Booting, VM, 문서, 목차 등)로 그룹핑하여 건수·비중(%)을 반환합니다.
     """
     clean_vals = [
         re.sub(r"\s*\[[^\]]+\]", "", str(v)).strip()
@@ -52,25 +63,24 @@ def cluster_text_series_by_topic(series: pd.Series, max_groups: int = 8) -> pd.D
         filtered = []
         for w in words:
             w_stem = re.sub(r"(으로|에서|에게|부터|까지|이라|란|로|은|는|이|가|을|를|의|와|과|만|도)$", "", w)
-            if len(w_stem) >= 2 and w_stem.lower() not in TOPIC_STOPWORDS:
+            if len(w_stem) >= 2 and w_stem.lower() not in TOPIC_STOPWORDS and not w_stem.isdigit():
                 filtered.append(w_stem)
         unique_in_row = list(dict.fromkeys(filtered))
         tokenized_list.append((text, unique_in_row))
         for uw in unique_in_row:
             word_counter[uw] += 1
 
-    # 2회 이상 등장한 핵심 키워드를 빈도순으로 선정
-    repeated_keywords = [w for w, c in word_counter.most_common(15) if c >= 2]
+    repeated_keywords = [w for w, c in word_counter.most_common(20) if c >= 2]
 
     grouped_items: dict[str, list[str]] = {}
     for text, tokens in tokenized_list:
         assigned_kw = None
         for kw in repeated_keywords:
-            if kw in tokens or kw in text:
-                assigned_kw = f"📁 [{kw}] 관련 항목"
+            if kw in tokens or kw.lower() in [t.lower() for t in tokens]:
+                assigned_kw = f"📁 [{kw}] 관련 시나리오"
                 break
         if assigned_kw is None:
-            first_word = tokens[0] if tokens else text[:10]
+            first_word = tokens[0] if tokens else text[:12]
             assigned_kw = f"📌 기타 ({first_word} 등)" if len(repeated_keywords) >= 2 else f"📄 {text[:18]}"
         grouped_items.setdefault(assigned_kw, []).append(text)
 
@@ -81,7 +91,7 @@ def cluster_text_series_by_topic(series: pd.Series, max_groups: int = 8) -> pd.D
     for idx, (g_name, items) in enumerate(sorted_groups):
         if idx < max_groups - 1 or len(sorted_groups) <= max_groups:
             cnt = len(items)
-            sample_preview = ", ".join(items[:4]) + (f" 외 {cnt - 4}건" if cnt > 4 else "")
+            sample_preview = ", ".join(items[:3]) + (f" 외 {cnt - 3}건" if cnt > 3 else "")
             final_rows.append({
                 "주제/분류 그룹": g_name,
                 "건수": cnt,
@@ -94,9 +104,9 @@ def cluster_text_series_by_topic(series: pd.Series, max_groups: int = 8) -> pd.D
 
     if etc_items:
         cnt = len(etc_items)
-        sample_preview = ", ".join(etc_items[:4]) + (f" 외 {cnt - 4}건" if cnt > 4 else "")
+        sample_preview = ", ".join(etc_items[:3]) + (f" 외 {cnt - 3}건" if cnt > 3 else "")
         final_rows.append({
-            "주제/분류 그룹": "📌 기타 단건 시나리오 묶음",
+            "주제/분류 그룹": "📌 기타 복합/단건 시나리오 묶음",
             "건수": cnt,
             "비중(%)": round(cnt / total * 100, 1),
             "표시라벨": f"{cnt}건 ({cnt / total * 100:.1f}%)",
@@ -107,7 +117,6 @@ def cluster_text_series_by_topic(series: pd.Series, max_groups: int = 8) -> pd.D
 
 
 def shorten_long_label(text: str, max_len: int = 24) -> str:
-    """Precondition이나 Expected Result처럼 긴 문장을 차트 축에 표시할 때 핵심만 남기고 깔끔하게 축약합니다."""
     s = re.sub(r"\s*\[[^\]]+\]", "", str(text)).strip()
     s = re.sub(r"https?://[^\s/]+(?:/wiki/)?", "", s).strip()
     s = re.sub(r"^PC 브라우저에서\s*", "", s).strip()
@@ -117,12 +126,12 @@ def shorten_long_label(text: str, max_len: int = 24) -> str:
 
 
 def analyze_color_cell_contexts(df: pd.DataFrame) -> pd.DataFrame:
-    """셀 배경색(🎨빨강강조 등)이 칠해진 셀의 컬럼 위치와 실제 의미를 분석합니다."""
+    """셀 배경색(🎨빨강강조 등)이 실제로 존재하는 셀만 추출하여 컬럼 위치와 실제 의미를 분석합니다."""
     rows = []
     if len(df) == 0:
         return pd.DataFrame()
 
-    id_col = next((c for c in df.columns if c.upper() in ("ID", "TC ID", "TC_ID", "TC-ID", "번호", "라인", "설비번호")), df.columns[0])
+    id_col = next((c for c in df.columns if c.upper() in ("ID", "TC ID", "TC_ID", "TC-ID", "TC", "번호", "라인", "설비번호")), df.columns[0])
     status_col = next(
         (c for c in df.columns if any(k in c.lower() for k in ["execution", "actual", "status", "result", "결과", "판정", "상태"])),
         None,
@@ -167,7 +176,6 @@ def analyze_color_cell_contexts(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def summarize_aux_sheets(aux_sheets: dict[str, pd.DataFrame] | None) -> pd.DataFrame:
-    """Summary, Environment 등 보조 시트의 내용을 한눈에 볼 수 있는 통합 요약표로 변환합니다."""
     if not aux_sheets:
         return pd.DataFrame()
 
@@ -195,7 +203,10 @@ def summarize_aux_sheets(aux_sheets: dict[str, pd.DataFrame] | None) -> pd.DataF
 
 
 def build_korean_stat_tables(df: pd.DataFrame, aux_sheets: dict[str, pd.DataFrame] | None = None) -> dict[str, pd.DataFrame]:
-    """어떤 구조의 파일이든 의미 있는 한글 통계표(보조시트 요약, 주제 그룹핑 집계, 사전조건 분포, 판정/색상 문맥 등)를 생성합니다."""
+    """
+    Domain, Sub System, Test Type, Automated 등 TC 절차서의 핵심 분류 컬럼을 누락 없이 집계하고,
+    영문 불용어를 제거한 Title 기술 키워드 그룹핑 표를 생성합니다.
+    """
     tables = {}
     if len(df) == 0:
         return tables
@@ -204,22 +215,65 @@ def build_korean_stat_tables(df: pd.DataFrame, aux_sheets: dict[str, pd.DataFram
     num_cols = df.select_dtypes(include=["number"]).columns.tolist()
     total_cnt = len(df)
 
+    # 1. 보조 시트(Summary, Environment 등) 통합 요약표 (존재할 때만)
     aux_df = summarize_aux_sheets(aux_sheets)
     if len(aux_df) > 0:
         tables["1. 보조 시트(Summary · Environment 등) 핵심 내용 통합 요약"] = aux_df
 
-    title_col = next((c for c in all_cols if any(k in c.lower() for k in ["title", "제목", "타이틀", "시나리오", "기능명", "항목명"])), None)
+    # 2. 주요 범주형 컬럼(Domain, Sub System, Test Type, Automated, Category, 불량유형 등) 전수 분포 집계
+    cat_priority_keywords = [
+        "domain", "sub system", "test type", "automated", "type",
+        "category", "priority", "severity", "status", "actual",
+        "불량유형", "시간대", "분류", "핵심 분류", "문서 섹션", "assignee"
+    ]
+    title_col = next((c for c in all_cols if any(k in c.lower() for k in ["title", "제목", "타이틀", "시나리오", "기능명"])), None)
+
+    cat_candidates = []
+    for c in all_cols:
+        if c == title_col or c.lower() == "_polarion":
+            continue
+        if any(k in c.lower() for k in cat_priority_keywords):
+            cat_candidates.append(c)
+
+    for c_col in cat_candidates[:5]:
+        clean_s = df[c_col].astype(str).apply(lambda x: re.sub(r"\s*\[[^\]]+\]", "", x).strip())
+        nunique = clean_s.nunique()
+        if nunique == 0 or (nunique > 35 and len(df) >= 30):
+            continue
+        vc = clean_s.value_counts()
+        c_rows = []
+        for val_name, cnt in vc.head(15).items():
+            share = (cnt / total_cnt * 100) if total_cnt > 0 else 0.0
+            c_rows.append({
+                f"[{c_col}] 세부 구분": val_name,
+                "건수(건)": int(cnt),
+                "비중(%)": f"{share:.1f}%",
+            })
+        if len(vc) > 15:
+            rem_cnt = int(vc.iloc[15:].sum())
+            rem_share = (rem_cnt / total_cnt * 100) if total_cnt > 0 else 0.0
+            c_rows.append({
+                f"[{c_col}] 세부 구분": f"기타 ({len(vc) - 15}종 합계)",
+                "건수(건)": rem_cnt,
+                "비중(%)": f"{rem_share:.1f}%",
+            })
+        if c_rows:
+            tables[f"{len(tables) + 1}. [{c_col}] 항목별 분포 및 비중 집계"] = pd.DataFrame(c_rows)
+
+    # 3. Title / 제목 기술 키워드 자동 그룹핑 집계표 (Verify, Check, to, for 제외 완료!)
     if title_col:
         topic_df = cluster_text_series_by_topic(df[title_col], max_groups=10)
         if len(topic_df) > 0:
-            tables[f"{len(tables) + 1}. [{title_col}] 유사 주제(키워드)별 자동 그룹핑 집계"] = topic_df[
+            tables[f"{len(tables) + 1}. [{title_col}] 핵심 기술 키워드별 그룹핑 집계"] = topic_df[
                 ["주제/분류 그룹", "건수", "비중(%)", "포함된 상세 항목"]
             ]
 
+    # 4. 셀 배경색(🎨빨강강조 등)이 실제로 존재할 때만 문맥 분석표 추가 (0건이면 아예 생성하지 않아 환각 차단!)
     color_ctx_df = analyze_color_cell_contexts(df)
     if len(color_ctx_df) > 0:
         tables[f"{len(tables) + 1}. 셀 배경색(강조 표시) 위치 및 문맥별 실제 의미 분석"] = color_ctx_df
 
+    # 5. 제조/생산 데이터 전용: 라인별 & 불량유형별 집계
     line_col = "라인" if "라인" in all_cols else ("생산라인" if "생산라인" in all_cols else None)
     if line_col and "생산량" in all_cols and "불량수" in all_cols:
         line_rows = []
@@ -249,32 +303,7 @@ def build_korean_stat_tables(df: pd.DataFrame, aux_sheets: dict[str, pd.DataFram
         if line_rows:
             tables[f"{len(tables) + 1}. 라인별 생산·품질 및 주요 불량 종합 집계"] = pd.DataFrame(line_rows)
 
-    cat_candidates = [
-        c for c in all_cols
-        if any(k in c.lower() for k in ["category", "priority", "severity", "precondition", "status", "actual", "불량유형", "시간대", "분류"])
-        and c != title_col
-    ]
-    for c_col in cat_candidates[:3]:
-        clean_s = df[c_col].astype(str).apply(lambda x: re.sub(r"\s*\[[^\]]+\]", "", x).strip())
-        if clean_s.nunique() > 12 and len(df) >= 10:
-            grp_df = cluster_text_series_by_topic(clean_s, max_groups=8)
-            if len(grp_df) > 0:
-                tables[f"{len(tables) + 1}. [{c_col}] 유형별 요약 집계"] = grp_df[
-                    ["주제/분류 그룹", "건수", "비중(%)", "포함된 상세 항목"]
-                ]
-        else:
-            vc = clean_s.value_counts()
-            c_rows = []
-            for val_name, cnt in vc.head(12).items():
-                share = (cnt / total_cnt * 100) if total_cnt > 0 else 0.0
-                c_rows.append({
-                    f"[{c_col}] 구분": val_name,
-                    "건수(건)": int(cnt),
-                    "비중(%)": f"{share:.1f}%",
-                })
-            if c_rows:
-                tables[f"{len(tables) + 1}. [{c_col}] 항목별 분포 및 비중 집계"] = pd.DataFrame(c_rows)
-
+    # 6. 수치형 항목 기초통계 요약
     if num_cols:
         stat_rows = []
         for col in num_cols:
@@ -305,7 +334,7 @@ def _format_section_text_for_excel(text: str) -> str:
         r"\n▶ \1",
         cleaned,
     )
-    cleaned = re.sub(r"(?:^|\n|\s+)(?:[-*•]\s*)?(\[(?:생산|설비|품질|정량|개발|검증|QA|담당)[^\]]*\])", r"\n  • \1", cleaned)
+    cleaned = re.sub(r"(?:^|\n|\s+)(?:[-*•]\s*)?(\[(?:생산|설비|품질|정량|개발|검증|QA|담당|테스트)[^\]]*\])", r"\n  • \1", cleaned)
 
     formatted_lines = []
     for raw_line in cleaned.splitlines():
@@ -345,7 +374,7 @@ def parse_report_into_sections(report_text: str) -> list[dict[str, str]]:
         if line.startswith("*(연결 모델:") or line.startswith("*(로컬 모델:"):
             model_info = line.strip("*() ")
             continue
-        if "확인 필요" in line or "이상 없음" in line or "점검 안내" in line:
+        if any(k in line for k in ["확인 필요", "이상 없음", "점검 안내", "절차서/명세 분석", "종합 분석 완료"]):
             status_banner = line.lstrip("> ").replace("**", "")
             continue
         cleaned_lines.append(line)
@@ -448,7 +477,7 @@ def _style_worksheet(ws):
                     else:
                         cell.font = body_font
                         cell.alignment = Alignment(vertical="top", horizontal="left", wrap_text=True)
-                        if "빨강" in val_str or "FAIL" in val_str:
+                        if "🎨빨강" in val_str or val_str.strip().upper() in ("FAIL", "FAILED", "NG", "불합격"):
                             cell.fill = alert_fill
                     cell.border = thin_border
 
@@ -561,18 +590,18 @@ def export_combined_analysis_to_excel(
             sec_map = {s["구분 항목"]: s["상세 분석 내용"] for s in sections}
 
             status_val = sec_map.get("자동 기준 판정 요약", "판정 완료")
-            trend_val = next((v for k, v in sec_map.items() if "1." in k or "추세" in k or "현황" in k), "")
-            anom_val = next((v for k, v in sec_map.items() if "2." in k or "이상" in k or "주의" in k or "색상" in k), "")
-            cause_val = next((v for k, v in sec_map.items() if "3." in k or "원인" in k or "가설" in k), "")
+            trend_val = next((v for k, v in sec_map.items() if "1." in k or "Executive" in k or "추세" in k or "현황" in k), "")
+            anom_val = next((v for k, v in sec_map.items() if "2." in k or "도메인" in k or "분포" in k or "이상" in k), "")
+            cause_val = next((v for k, v in sec_map.items() if "3." in k or "리스크" in k or "원인" in k or "가설" in k), "")
             action_val = next((v for k, v in sec_map.items() if "4." in k or "조치" in k), "")
 
             comp_rows.append({
                 "AI 모델명": model_labels.get(m_code, m_code),
                 "소요 시간(초)": float(res.get("elapsed_time", 0.0)),
                 "자동 판정 요약": _format_section_text_for_excel(status_val),
-                "1. 시트 종합 현황 및 추세": _format_section_text_for_excel(trend_val) or "개별 시트 참조",
-                "2. 주요 이상·강조 항목 해석": _format_section_text_for_excel(anom_val) or "개별 시트 참조",
-                "3. 데이터 근거 원인 가설": _format_section_text_for_excel(cause_val) or "개별 시트 참조",
+                "1. Executive Snapshot": _format_section_text_for_excel(trend_val) or "개별 시트 참조",
+                "2. 도메인·서브시스템 분포": _format_section_text_for_excel(anom_val) or "개별 시트 참조",
+                "3. 리스크 및 원인 가설": _format_section_text_for_excel(cause_val) or "개별 시트 참조",
                 "4. 실무 조치 제안": _format_section_text_for_excel(action_val) or "개별 시트 참조",
             })
 
