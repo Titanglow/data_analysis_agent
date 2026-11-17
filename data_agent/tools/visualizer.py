@@ -92,7 +92,7 @@ def render_validation_banner(df: pd.DataFrame, threshold: float = 1.5):
         st.success(f"**{verdict_str}**")
 
     with st.expander(
-        f"🛡️ [W47 양식 자동 검증 완료] 유형: {val_res['domain_type']} | "
+        f"🛡️ [양식 자동 검증 완료] 유형: {val_res['domain_type']} | "
         f"데이터 충실도(작성률): {val_res['fill_rate']}% | "
         f"비교 유효 차원: {len(val_res['informative_cols'])}개 컬럼 (상세 보기)",
         expanded=False,

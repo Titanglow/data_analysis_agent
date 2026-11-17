@@ -931,7 +931,7 @@ with st.sidebar:
         )
 
     st.divider()
-    st.subheader("🎚️ 사내 품질 기준값 설정 (W47)")
+    st.subheader("🎚️ 사내 품질 기준값 설정")
     defect_threshold = st.slider(
         "사내 관리 기준값 / 임계치 (%)",
         min_value=0.5,

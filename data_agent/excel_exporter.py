@@ -715,67 +715,204 @@ def export_combined_analysis_to_excel(
 
 
 # =====================================================================
-# 📄 MS Word (.docx) 보고서 생성기 (첫 페이지 종합 요약표 + AI별 강제 쪽 나누기 지원!)
+# 📄 MS Word (.docx) 보고서 엔진 (빈 페이지 0건 보장 + 표 스타일 고도화)
 # =====================================================================
-def _docx_p(text: str, bold: bool = False, size_half_pt: int = 21, color: str = "1F2937", space_after: int = 110) -> str:
+def _docx_p(
+    text: str,
+    bold: bool = False,
+    size_half_pt: int = 20,
+    color: str = "1F2937",
+    space_before: int = 0,
+    space_after: int = 90,
+    left_indent: int = 0,
+    align: str = "left",
+    page_break_before: bool = False,
+    keep_with_next: bool = False,
+    bottom_border_color: str | None = None,
+) -> str:
+    """
+    OpenXML 문단 생성기:
+    - 빈 문단(<w:p/>)을 만들지 않고 space_before / space_after로만 간격을 제어하여 빈 페이지 생성을 원천 차단합니다.
+    - page_break_before=True 설정 시 <w:pageBreakBefore/>가 적용되어, 앞 내용이 페이지를 꽉 채워 이미 넘어간 경우
+      중복 페이지 나누기를 하지 않고 무조건 새 페이지 최상단에서 시작합니다.
+    """
     t_esc = escape(str(text))
-    b_tag = "<w:b/>" if bold else ""
+    ppr_parts = []
+    if page_break_before:
+        ppr_parts.append("<w:pageBreakBefore/>")
+    if keep_with_next:
+        ppr_parts.append("<w:keepNext/>")
+    if bottom_border_color:
+        ppr_parts.append(
+            f'<w:pBdr><w:bottom w:val="single" w:sz="12" w:space="4" w:color="{bottom_border_color}"/></w:pBdr>'
+        )
+    ppr_parts.append(f'<w:spacing w:before="{space_before}" w:after="{space_after}" w:line="276" w:lineRule="auto"/>')
+    if left_indent > 0:
+        ppr_parts.append(f'<w:ind w:left="{left_indent}"/>')
+    if align != "left":
+        ppr_parts.append(f'<w:jc w:val="{align}"/>')
+
+    b_tag = "<w:b/><w:bCs/>" if bold else ""
     return (
-        f'<w:p><w:pPr><w:spacing w:after="{space_after}"/></w:pPr>'
-        f'<w:r><w:rPr><w:rFonts w:ascii="맑은 고딕" w:eastAsia="맑은 고딕" w:hAnsi="맑은 고딕"/>'
-        f'{b_tag}<w:color w:val="{color}"/><w:sz w:val="{size_half_pt}"/></w:rPr>'
+        f'<w:p><w:pPr>{"".join(ppr_parts)}</w:pPr>'
+        f'<w:r><w:rPr><w:rFonts w:ascii="맑은 고딕" w:eastAsia="맑은 고딕" w:hAnsi="맑은 고딕" w:cs="맑은 고딕"/>'
+        f'{b_tag}<w:color w:val="{color}"/><w:sz w:val="{size_half_pt}"/><w:szCs w:val="{size_half_pt}"/></w:rPr>'
         f'<w:t xml:space="preserve">{t_esc}</w:t></w:r></w:p>'
     )
 
 
-def _docx_page_break() -> str:
-    """강제 페이지 나누기(쪽 나누기) XML 태그: 여백이 남아도 무조건 다음 페이지 첫 줄에서 시작합니다."""
-    return '<w:p><w:r><w:br w:type="page"/></w:r></w:p>'
+def _docx_banner(sub_label: str, main_title: str, meta_line: str, page_break_before: bool = False) -> str:
+    """문서 상단 또는 개별 AI 페이지 최상단에 들어가는 다크 에메랄드(#064E3B) 타이틀 배너 표"""
+    p1 = _docx_p(
+        sub_label,
+        bold=True,
+        size_half_pt=19,
+        color="A7F3D0",
+        space_before=0,
+        space_after=60,
+        page_break_before=page_break_before,
+        keep_with_next=True,
+    )
+    p2 = _docx_p(main_title, bold=True, size_half_pt=28, color="FFFFFF", space_before=0, space_after=70, keep_with_next=True)
+    p3 = _docx_p(meta_line, bold=False, size_half_pt=18, color="D1FAE5", space_before=0, space_after=0)
+
+    return (
+        '<w:tbl>'
+        '<w:tblPr>'
+        '<w:tblW w:w="5000" w:type="pct"/>'
+        '<w:jc w:val="center"/>'
+        '<w:tblCellMar>'
+        '<w:top w:w="160" w:type="dxa"/><w:bottom w:w="160" w:type="dxa"/>'
+        '<w:left w:w="200" w:type="dxa"/><w:right w:w="200" w:type="dxa"/>'
+        '</w:tblCellMar>'
+        '</w:tblPr>'
+        '<w:tblGrid><w:gridCol w:w="9638"/></w:tblGrid>'
+        '<w:tr><w:trPr><w:cantSplit/></w:trPr>'
+        '<w:tc><w:tcPr><w:tcW w:w="5000" w:type="pct"/>'
+        '<w:shd w:val="clear" w:color="auto" w:fill="064E3B"/></w:tcPr>'
+        f'{p1}{p2}{p3}'
+        '</w:tc></w:tr></w:tbl>'
+    )
 
 
-def _docx_table(headers: list[str], rows: list[list[str]]) -> str:
-    """Word 문서 내부에 깔끔한 초록색 헤더 표(<w:tbl>)를 생성합니다."""
+def _docx_table(
+    headers: list[str],
+    rows: list[list[str]],
+    col_widths_pct: list[int] | None = None,
+    header_bg: str = "059669",
+) -> str:
+    """
+    경영진 보고서급 Word 표 생성기:
+    - 열 너비 비율(col_widths_pct) 명시적 지정
+    - 셀 내부 여백(tcMar: 상하 90, 좌우 130 dxa) 및 행 분할 방지(cantSplit)
+    - 1열 소프트 민트 배경(#F0FDF4), 짝수 행 줄무늬(#F8FAFC), '확인 필요' 경고 셀(#FEF2F2) 자동 하이라이트
+    """
+    num_cols = len(headers)
+    if not col_widths_pct or len(col_widths_pct) != num_cols:
+        even_pct = 100 // max(1, num_cols)
+        col_widths_pct = [even_pct] * num_cols
+        col_widths_pct[-1] = 100 - sum(col_widths_pct[:-1])
+
+    total_dxa = 9638
+    grid_cols = "".join(f'<w:gridCol w:w="{int(total_dxa * (p / 100.0))}"/>' for p in col_widths_pct)
+
     borders = (
         '<w:tblBorders>'
-        '<w:top w:val="single" w:sz="6" w:space="0" w:color="9CA3AF"/>'
-        '<w:bottom w:val="single" w:sz="6" w:space="0" w:color="9CA3AF"/>'
-        '<w:left w:val="single" w:sz="6" w:space="0" w:color="9CA3AF"/>'
-        '<w:right w:val="single" w:sz="6" w:space="0" w:color="9CA3AF"/>'
-        '<w:insideH w:val="single" w:sz="4" w:space="0" w:color="D1D5DB"/>'
-        '<w:insideV w:val="single" w:sz="4" w:space="0" w:color="D1D5DB"/>'
+        '<w:top w:val="single" w:sz="8" w:space="0" w:color="059669"/>'
+        '<w:bottom w:val="single" w:sz="8" w:space="0" w:color="059669"/>'
+        '<w:insideH w:val="single" w:sz="4" w:space="0" w:color="CBD5E1"/>'
+        '<w:left w:val="none"/>'
+        '<w:right w:val="none"/>'
+        '<w:insideV w:val="single" w:sz="4" w:space="0" w:color="E2E8F0"/>'
         '</w:tblBorders>'
     )
-    tbl_xml = [f'<w:tbl><w:tblPr><w:tblW w:w="5000" w:type="pct"/>{borders}</w:tblPr>']
+    cell_margins = (
+        '<w:tblCellMar>'
+        '<w:top w:w="95" w:type="dxa"/>'
+        '<w:bottom w:w="95" w:type="dxa"/>'
+        '<w:left w:w="135" w:type="dxa"/>'
+        '<w:right w:w="135" w:type="dxa"/>'
+        '</w:tblCellMar>'
+    )
 
-    # 헤더 행 (초록 배경 #059669 + 흰색 볼드 글씨)
+    tbl_xml = [
+        f'<w:tbl><w:tblPr><w:tblW w:w="5000" w:type="pct"/><w:jc w:val="center"/>{borders}{cell_margins}</w:tblPr>'
+        f'<w:tblGrid>{grid_cols}</w:tblGrid>'
+    ]
+
+    # 헤더 행
     h_cells = []
-    for h in headers:
+    for idx, h in enumerate(headers):
+        w_pct_50 = col_widths_pct[idx] * 50
         h_cells.append(
-            '<w:tc><w:tcPr><w:shd w:val="clear" w:color="auto" w:fill="059669"/></w:tcPr>'
-            f'{_docx_p(h, bold=True, size_half_pt=19, color="FFFFFF", space_after=60)}</w:tc>'
+            f'<w:tc><w:tcPr><w:tcW w:w="{w_pct_50}" w:type="pct"/>'
+            f'<w:shd w:val="clear" w:color="auto" w:fill="{header_bg}"/>'
+            f'<w:vAlign w:val="center"/></w:tcPr>'
+            f'{_docx_p(h, bold=True, size_half_pt=19, color="FFFFFF", space_before=0, space_after=0, align="center")}'
+            f'</w:tc>'
         )
-    tbl_xml.append(f'<w:tr>{"".join(h_cells)}</w:tr>')
+    tbl_xml.append(f'<w:tr><w:trPr><w:tblHeader/><w:cantSplit/></w:trPr>{"".join(h_cells)}</w:tr>')
 
     # 데이터 행
-    for r in rows:
+    for r_idx, r in enumerate(rows):
         r_cells = []
-        for idx, cell_val in enumerate(r):
-            bg = "F9FAFB" if idx == 0 else "FFFFFF"
-            is_b = idx == 0
-            lines = [l.strip() for l in str(cell_val).splitlines() if l.strip()] or ["-"]
-            p_tags = "".join(_docx_p(l, bold=is_b, size_half_pt=18, color="111827", space_after=50) for l in lines)
-            r_cells.append(f'<w:tc><w:tcPr><w:shd w:val="clear" w:color="auto" w:fill="{bg}"/></w:tcPr>{p_tags}</w:tc>')
-        tbl_xml.append(f'<w:tr>{"".join(r_cells)}</w:tr>')
+        row_bg = "FFFFFF" if r_idx % 2 == 0 else "F8FAFC"
+        for c_idx, cell_val in enumerate(r):
+            w_pct_50 = col_widths_pct[c_idx] * 50
+            val_str = str(cell_val or "-").strip()
+            is_alert = ("🚨" in val_str) or ("확인 필요" in val_str)
 
-    tbl_xml.append('</w:tbl>')
+            if c_idx == 0:
+                bg = "F0FDF4"
+                txt_color = "065F46"
+                is_bold = True
+            elif is_alert:
+                bg = "FEF2F2"
+                txt_color = "991B1B"
+                is_bold = True
+            else:
+                bg = row_bg
+                txt_color = "1F2937"
+                is_bold = False
+
+            lines = [l.strip() for l in val_str.splitlines() if l.strip()] or ["-"]
+            p_tags = []
+            for l_i, line_txt in enumerate(lines):
+                sp_after = 55 if l_i < len(lines) - 1 else 0
+                p_tags.append(
+                    _docx_p(
+                        line_txt,
+                        bold=is_bold,
+                        size_half_pt=18,
+                        color=txt_color,
+                        space_before=0,
+                        space_after=sp_after,
+                        align="center" if (c_idx == 0 and num_cols >= 4) else "left",
+                    )
+                )
+            r_cells.append(
+                f'<w:tc><w:tcPr><w:tcW w:w="{w_pct_50}" w:type="pct"/>'
+                f'<w:shd w:val="clear" w:color="auto" w:fill="{bg}"/>'
+                f'<w:vAlign w:val="center"/></w:tcPr>{"".join(p_tags)}</w:tc>'
+            )
+        tbl_xml.append(f'<w:tr><w:trPr><w:cantSplit/></w:trPr>{"".join(r_cells)}</w:tr>')
+
+    tbl_xml.append("</w:tbl>")
     return "".join(tbl_xml)
 
 
 def _pack_docx_xml(body_elements: list[str]) -> bytes:
+    """A4 용지 규격 및 여백(2.0cm)을 설정하여 OpenXML(.docx) 파일로 패키징합니다."""
+    sect_pr = (
+        '<w:sectPr>'
+        '<w:pgSz w:w="11906" w:h="16838"/>'
+        '<w:pgMar w:top="1080" w:right="1080" w:bottom="1080" w:left="1080" w:header="720" w:footer="720" w:gutter="0"/>'
+        '</w:sectPr>'
+    )
     document_xml = (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
         '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
-        f'<w:body>{"".join(body_elements)}<w:sectPr/></w:body></w:document>'
+        f'<w:body>{"".join(body_elements)}{sect_pr}</w:body></w:document>'
     )
     content_types_xml = (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
@@ -800,6 +937,41 @@ def _pack_docx_xml(body_elements: list[str]) -> bytes:
     return buf.getvalue()
 
 
+def _append_formatted_report_sections(body: list[str], report_text: str):
+    """각 섹션의 제목과 본문을 빈 줄(<w:p/>) 없이 깔끔한 들여쓰기와 여백으로 Word 본문에 추가합니다."""
+    parsed = [
+        s for s in parse_report_into_sections(report_text)
+        if s["구분 항목"] not in ("자동 기준 판정 요약", "구동 AI 엔진 상세")
+    ]
+    for sec in parsed:
+        body.append(
+            _docx_p(
+                f"■ {sec['구분 항목']}",
+                bold=True,
+                size_half_pt=22,
+                color="047857",
+                space_before=160,
+                space_after=70,
+                keep_with_next=True,
+                bottom_border_color="059669",
+            )
+        )
+        lines = [l.strip() for l in str(sec["상세 분석 내용"]).splitlines() if l.strip()]
+        for l_idx, clean_l in enumerate(lines):
+            is_sub_header = clean_l.startswith("▶")
+            body.append(
+                _docx_p(
+                    clean_l,
+                    bold=is_sub_header,
+                    size_half_pt=19,
+                    color="065F46" if is_sub_header else "1F2937",
+                    space_before=60 if is_sub_header else 0,
+                    space_after=55 if l_idx < len(lines) - 1 else 100,
+                    left_indent=120 if not is_sub_header else 40,
+                )
+            )
+
+
 def export_analysis_to_docx(
     df: pd.DataFrame,
     report_text: str,
@@ -812,31 +984,35 @@ def export_analysis_to_docx(
     verdict_str = evaluate_threshold_verdict(df, threshold=threshold)
 
     body = [
-        _docx_p("📊 사내 데이터 AI 정밀 분석 보고서", bold=True, size_half_pt=32, color="059669", space_after=160),
-        _docx_table(
-            ["항목", "상세 내용"],
-            [
-                ["분석 일시", analyzed_at],
-                ["분석 AI 엔진", f"{mode} (소요 시간: {elapsed_time}초)"],
-                ["분석 대상 건수", f"총 {len(df):,}건 (사내 관리 기준값: {threshold}%)"],
-                [f"자동 기준({threshold}%) 판정", verdict_str],
-            ],
+        _docx_banner(
+            sub_label="[사내 데이터 분석 AI Agent] 단일 모델 상세 분석 보고서",
+            main_title=f"{mode} — 데이터 정밀 분석 리포트",
+            meta_line=f"분석 일시: {analyzed_at}  |  대상 데이터: 총 {len(df):,}건  |  소요 시간: {elapsed_time}초",
+            page_break_before=False,
         ),
-        _docx_p("", space_after=140),
+        _docx_p(
+            "01. 분석 개요 및 사내 기준 자동 판정",
+            bold=True,
+            size_half_pt=22,
+            color="047857",
+            space_before=160,
+            space_after=80,
+            keep_with_next=True,
+            bottom_border_color="059669",
+        ),
+        _docx_table(
+            headers=["구분 항목", "상세 내용"],
+            rows=[
+                ["분석 일시", analyzed_at],
+                ["구동 AI 엔진", f"{mode} (분석 소요 시간: {elapsed_time}초)"],
+                ["분석 대상 건수", f"총 {len(df):,}건 (사내 관리 기준값: {threshold}% 적용)"],
+                [f"사내 기준({threshold}%) 판정", verdict_str],
+            ],
+            col_widths_pct=[24, 76],
+        ),
     ]
 
-    parsed = [
-        s for s in parse_report_into_sections(report_text)
-        if s["구분 항목"] != "자동 기준 판정 요약"
-    ]
-    for sec in parsed:
-        body.append(_docx_p(f"■ {sec['구분 항목']}", bold=True, size_half_pt=24, color="047857", space_after=90))
-        for line in str(sec["상세 분석 내용"]).splitlines():
-            clean_l = line.strip()
-            if clean_l:
-                body.append(_docx_p(f"  {clean_l}", bold=False, size_half_pt=20, color="111827", space_after=70))
-        body.append(_docx_p("", space_after=80))
-
+    _append_formatted_report_sections(body, report_text)
     return _pack_docx_xml(body)
 
 
@@ -847,116 +1023,168 @@ def export_combined_analysis_to_docx(
     threshold: float = 1.5,
 ) -> bytes:
     """
-    [ALL 분석 리포트 워드 문서 (.docx) 구조]
-    - 1페이지 (첫 페이지): 전체 분석 보고서 종합 요약본 (메타데이터 표 + AI 모델별 핵심 진단 비교 요약표)
-    - 2페이지부터 (다음 페이지~): 강제 페이지 나누기(<w:br w:type="page"/>)를 적용하여
-      각 AI(API)별 상세 분석 리포트가 무조건 새 페이지 첫 줄에서 시작하도록 구성!
+    [워드(DOCX) 보고서 출력 및 페이지 나누기 규칙 완벽 준수]
+    1. 1페이지 (종합 요약): 모든 API(AI) 분석 결과를 통합하여 핵심 인사이트와 '확인 필요' 사항을 요약 정리.
+    2. 2페이지 이후 (개별 분석): 각 API(AI)별 상세 분석 내용은 1페이지에 섞지 않고 각각 독립된 페이지 최상단에서 시작.
+    3. 빈 페이지(Blank Page) 원천 방지:
+       - 독립된 빈 페이지 나누기 문단(<w:br/>)이나 더미 빈 줄(<w:p/>)을 일절 생성하지 않음.
+       - 각 AI 섹션 첫 문단에만 <w:pageBreakBefore/>를 부여하여, 이전 섹션이 페이지 끝까지 꽉 차서 이미 넘어간 경우
+         중복 페이지 나누기를 자동 생략하고, 마지막 섹션 뒤에도 페이지 나누기를 삽입하지 않음.
     """
     verdict_str = evaluate_threshold_verdict(df, threshold=threshold)
+    valid_items = [
+        (m_code, res)
+        for m_code, res in saved_results.items()
+        if res and str(res.get("report", "")).strip()
+    ]
     first_time = next(
-        (r.get("analyzed_at") for r in saved_results.values() if r.get("analyzed_at")),
+        (r.get("analyzed_at") for _, r in valid_items if r.get("analyzed_at")),
         datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     )
-    model_names_str = ", ".join(model_labels.get(m, m) for m in saved_results.keys())
+    model_names_str = ", ".join(model_labels.get(m, m) for m, _ in valid_items)
 
-    # =========================================================================
-    # [첫 페이지] 전체 분석 보고서 종합 요약본 (Executive Summary)
-    # =========================================================================
-    body = [
-        _docx_p("📚 다중 AI 모델 종합 비교 분석 보고서", bold=True, size_half_pt=34, color="059669", space_after=140),
-        _docx_p("■ [1페이지] 전체 분석 보고서 종합 요약본 (Executive Summary)", bold=True, size_half_pt=24, color="047857", space_after=100),
-        _docx_table(
-            ["종합 요약 항목", "상세 내용"],
-            [
-                ["분석 일시", first_time],
-                ["비교 분석 AI 모델", f"총 {len(saved_results)}개 모델 ({model_names_str})"],
-                ["분석 대상 데이터", f"총 {len(df):,}건 (사내 관리 기준값: {threshold}% 적용)"],
-                [f"사내 기준({threshold}%) 판정", verdict_str],
-            ],
-        ),
-        _docx_p("", space_after=120),
-        _docx_p("■ AI 모델별 핵심 진단 및 실무 조치 한눈에 비교", bold=True, size_half_pt=23, color="047857", space_after=90),
-    ]
-
+    # 모든 AI 결과에서 '통합 핵심 인사이트'와 '확인 필요 및 즉시 조치 사항' 추출
+    integrated_insights = []
+    check_required_points = []
     summary_table_rows = []
-    for m_code, res in saved_results.items():
+
+    for m_code, res in valid_items:
         m_title = model_labels.get(m_code, m_code)
+        short_m = m_title.split("(")[0].replace("⚡", "").replace("☁️", "").replace("🔒", "").strip()
         el_str = f"{res.get('elapsed_time', 0.0)}초"
         sections = parse_report_into_sections(res.get("report", ""))
         sec_map = {s["구분 항목"]: s["상세 분석 내용"] for s in sections}
 
         s1 = next((v for k, v in sec_map.items() if "1." in k or "요약" in k or "현황" in k or "추세" in k), "")
         s2 = next((v for k, v in sec_map.items() if "2." in k or "분포" in k or "이상" in k), "")
+        s3 = next((v for k, v in sec_map.items() if "3." in k or "리스크" in k or "원인" in k), "")
         s4 = next((v for k, v in sec_map.items() if "4." in k or "조치" in k), "")
 
-        def _first_2_lines(txt: str) -> str:
-            lines = [l.strip() for l in str(txt).splitlines() if l.strip()]
-            return "\n".join(lines[:2]) if lines else "상세 페이지 참조"
+        s1_lines = [l.lstrip("•-*▶ ").strip() for l in str(s1).splitlines() if l.strip()]
+        s2_lines = [l.lstrip("•-*▶ ").strip() for l in str(s2).splitlines() if l.strip()]
+        s3_lines = [l.lstrip("•-*▶ ").strip() for l in str(s3).splitlines() if l.strip()]
+        s4_lines = [l.lstrip("•-*▶ ").strip() for l in str(s4).splitlines() if l.strip()]
+
+        if s1_lines:
+            integrated_insights.append(f"• [{short_m}] {s1_lines[0][:95]}")
+        if s3_lines:
+            check_required_points.append(f"• [{short_m} 점검] {s3_lines[0][:95]}")
+        elif s4_lines:
+            check_required_points.append(f"• [{short_m} 조치] {s4_lines[0][:95]}")
+
+        def _compact_lines(lines_list: list[str], max_l: int = 2) -> str:
+            if not lines_list:
+                return "개별 상세 페이지 참조"
+            return "\n".join(f"• {l[:70]}" for l in lines_list[:max_l])
 
         summary_table_rows.append([
-            f"{m_title}\n({el_str})",
-            _first_2_lines(s1),
-            _first_2_lines(s2),
-            _first_2_lines(s4),
+            f"{short_m}\n({el_str})",
+            _compact_lines(s1_lines, 2),
+            _compact_lines(s2_lines, 2),
+            _compact_lines(s4_lines, 2),
         ])
 
-    body.append(
-        _docx_table(
-            ["AI 모델 (소요시간)", "1. 핵심 현황 요약", "2. 주요 분포 진단", "4. 핵심 조치 제안"],
-            summary_table_rows,
-        )
-    )
-    body.append(_docx_p("", space_after=80))
-    body.append(
+    integrated_insight_str = "\n".join(integrated_insights[:3]) if integrated_insights else "각 모델별 상세 분석 참조"
+    check_required_str = (
+        f"{verdict_str}\n" + ("\n".join(check_required_points[:3]) if check_required_points else "")
+    ).strip()
+
+    # =========================================================================
+    # [1페이지] 종합 요약 (Executive Summary) — 1페이지에 깔끔하게 수렴
+    # =========================================================================
+    body = [
+        _docx_banner(
+            sub_label="[사내 데이터 분석 AI Agent] 다중 AI 모델 종합 분석 보고서",
+            main_title="1페이지: 전체 AI 분석 종합 요약 및 확인 필요 사항",
+            meta_line=f"분석 일시: {first_time}  |  비교 모델: {len(valid_items)}종  |  대상 데이터: 총 {len(df):,}건 (기준 {threshold}%)",
+            page_break_before=False,
+        ),
         _docx_p(
-            "※ 다음 페이지(2페이지~)부터는 각 AI 모델별로 분석한 상세 리포트 전문이 페이지별로 분리되어 기재됩니다.",
+            "01. 전체 분석 종합 요약 및 '확인 필요' 핵심 진단",
             bold=True,
-            size_half_pt=19,
-            color="2563EB",
-            space_after=80,
-        )
-    )
+            size_half_pt=22,
+            color="047857",
+            space_before=140,
+            space_after=70,
+            keep_with_next=True,
+            bottom_border_color="059669",
+        ),
+        _docx_table(
+            headers=["종합 요약 구분", "핵심 내용 및 확인 필요 사항"],
+            rows=[
+                ["분석 일시 / 대상 건수", f"{first_time}  |  총 {len(df):,}건 (사내 관리 기준값: {threshold}% 적용)"],
+                ["참여 AI 모델", f"총 {len(valid_items)}개 모델 동시 분석 ({model_names_str})"],
+                [f"확인 필요 사항 (기준 {threshold}%)", check_required_str],
+                ["통합 핵심 인사이트 요약", integrated_insight_str],
+            ],
+            col_widths_pct=[24, 76],
+        ),
+        _docx_p(
+            "02. API(AI) 모델별 핵심 분석 결과 비교 요약표",
+            bold=True,
+            size_half_pt=22,
+            color="047857",
+            space_before=140,
+            space_after=70,
+            keep_with_next=True,
+            bottom_border_color="059669",
+        ),
+        _docx_table(
+            headers=["AI 모델 (소요시간)", "1. 핵심 현황 요약", "2. 주요 분포·집중 구간", "4. 실무 조치 핵심 요약"],
+            rows=summary_table_rows,
+            col_widths_pct=[18, 27, 27, 28],
+        ),
+        _docx_p(
+            "※ 2페이지부터는 각 API(AI) 모델별 상세 분석 리포트 전문이 독립된 페이지에서 순서대로 시작됩니다.",
+            bold=True,
+            size_half_pt=18,
+            color="047857",
+            space_before=100,
+            space_after=0,
+        ),
+    ]
 
     # =========================================================================
-    # [다음 페이지부터] 각 AI(API)별 상세 리포트 (무조건 강제 쪽 나누기 적용!)
+    # [2페이지 이후] 각 API(AI)별 상세 분석 리포트 (독립 페이지 시작 + 빈 페이지 방지)
     # =========================================================================
-    for idx, (m_code, res) in enumerate(saved_results.items(), start=2):
-        # 여백이 남아 있어도 무조건 강제로 다음 페이지에서 시작!
-        body.append(_docx_page_break())
-
+    for idx, (m_code, res) in enumerate(valid_items, start=1):
         m_name = model_labels.get(m_code, m_code)
         el = res.get("elapsed_time", 0.0)
         m_time = res.get("analyzed_at") or first_time
 
+        # 배너의 첫 문단에 page_break_before=True를 부여하여 무조건 새 페이지 최상단에서 시작!
+        # (앞 섹션이 페이지를 꽉 채워 이미 넘어간 경우 중복 페이지 나누기를 하지 않으며, 문서 끝에도 빈 페이지가 생기지 않음)
+        body.append(
+            _docx_banner(
+                sub_label=f"[개별 AI 상세 분석 섹션 {idx}/{len(valid_items)}] — 독립 페이지 분리 리포트",
+                main_title=f"{m_name} 상세 분석 보고서",
+                meta_line=f"분석 일시: {m_time}  |  분석 소요 시간: {el}초  |  적용 기준값: {threshold}%",
+                page_break_before=True,
+            )
+        )
         body.append(
             _docx_p(
-                f"📊 [{idx}페이지~] {m_name} — 개별 상세 분석 리포트",
+                "■ 모델 실행 정보 및 사내 기준 판정",
                 bold=True,
-                size_half_pt=30,
-                color="059669",
-                space_after=120,
+                size_half_pt=21,
+                color="047857",
+                space_before=130,
+                space_after=65,
+                keep_with_next=True,
             )
         )
         body.append(
             _docx_table(
-                ["모델 정보 항목", "내용"],
-                [
-                    ["구동 AI 모델", m_name],
-                    ["분석 일시 / 소요 시간", f"{m_time}  (총 {el}초 소요)"],
+                headers=["항목", "상세 내용"],
+                rows=[
+                    ["구동 AI 모델", f"{m_name} (총 {el}초 소요)"],
+                    ["분석 일시 / 데이터 건수", f"{m_time}  |  총 {len(df):,}건"],
                     [f"자동 기준({threshold}%) 판정 요약", verdict_str],
                 ],
+                col_widths_pct=[24, 76],
             )
         )
-        body.append(_docx_p("", space_after=120))
 
-        for s in parse_report_into_sections(res.get("report", "")):
-            if s["구분 항목"] == "자동 기준 판정 요약":
-                continue
-            body.append(_docx_p(f"■ {s['구분 항목']}", bold=True, size_half_pt=23, color="047857", space_after=90))
-            for line in str(s["상세 분석 내용"]).splitlines():
-                clean_l = line.strip()
-                if clean_l:
-                    body.append(_docx_p(f"  {clean_l}", bold=False, size_half_pt=20, color="111827", space_after=70))
-            body.append(_docx_p("", space_after=90))
+        _append_formatted_report_sections(body, res.get("report", ""))
 
     return _pack_docx_xml(body)
