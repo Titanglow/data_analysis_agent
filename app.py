@@ -25,7 +25,6 @@ from data_agent.tools.data_loader import (
     TABLE_NAME,
 )
 
-# Streamlit 기본 테마 초록색(#059669) 설정 파일 자동 생성
 CONFIG_DIR = Path(".streamlit")
 CONFIG_FILE = CONFIG_DIR / "config.toml"
 if not CONFIG_FILE.exists():
@@ -66,7 +65,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-DISTINCT_PALETTE = ["#2563EB", "#DC2626", "#059669", "#D97706", "#7C3AED", "#0891B2", "#DB2777"]
+DISTINCT_PALETTE = ["#059669", "#2563EB", "#DC2626", "#D97706", "#7C3AED", "#0891B2", "#DB2777"]
 
 st.title("📊 자연어 기반 사내 데이터 분석 Agent")
 
@@ -81,6 +80,8 @@ if "saved_results" not in st.session_state:
     st.session_state["saved_results"] = {}
 if "last_analyzed_df" not in st.session_state:
     st.session_state["last_analyzed_df"] = None
+if "last_aux_sheets" not in st.session_state:
+    st.session_state["last_aux_sheets"] = {}
 if "pipeline_logs" not in st.session_state:
     st.session_state["pipeline_logs"] = []
 
@@ -89,19 +90,14 @@ if "pipeline_logs" not in st.session_state:
 # ⚡ 실시간 파이프라인 가동현황 (1번 ~ 5번 배지: 분석 완료 시 4·5번 즉시 초록색 전환)
 # =====================================================================
 def render_pipeline_status(has_file: bool, has_query_df: bool, saved_results: dict):
-    """
-    1~5단계 실시간 파이프라인 가동현황을 렌더링합니다.
-    3번 AI 분석이 완료되어 saved_results가 채워지면 4번(리포트 검증·보정)과 5번(통합 엑셀 패키징)까지
-    모두 초록색 완료(✅) 상태로 즉시 활성화됩니다.
-    """
     has_analysis = bool(saved_results)
     has_verified_report = has_analysis and any(bool(v.get("report")) for v in saved_results.values())
     has_excel_pkg = has_analysis and any(bool(v.get("excel_bytes")) for v in saved_results.values())
 
     steps = [
-        (1, "1. 데이터 로드·색상 스캔", has_file, "다중 시트·배경색 스캔 완료" if has_file else "파일 업로드 대기"),
-        (2, "2. 스마트 SQL·다차원 집계", has_query_df, "SQLite 적재·한글 집계 완료" if has_query_df else "데이터 집계 대기"),
-        (3, "3. AI 비서 다중 모델 추론", has_analysis, f"{len(saved_results)}개 모델 병렬 추론 완료" if has_analysis else "분석 실행 대기"),
+        (1, "1. 문서·시트·색상 스캔", has_file, "다중 시트·배경색 스캔 완료" if has_file else "파일 업로드 대기"),
+        (2, "2. SQLite DB·정밀 집계", has_query_df, "DB 적재·한글 통계 완료" if has_query_df else "데이터 집계 대기"),
+        (3, "3. 3대 AI 병렬 추론", has_analysis, f"{len(saved_results)}개 모델 추론 완료" if has_analysis else "분석 실행 대기"),
         (4, "4. 리포트 품질 검증·보정", has_verified_report, "수치·양식 자동 정제 완료" if has_verified_report else "리포트 검증 대기"),
         (5, "5. 통합 리포트·엑셀 완료", has_excel_pkg, "다중 시트·차트 패키징 완료" if has_excel_pkg else "엑셀 생성 대기"),
     ]
@@ -145,14 +141,13 @@ def render_pipeline_status(has_file: bool, has_query_df: bool, saved_results: di
 
 
 def style_dataframe_with_colors(df: pd.DataFrame):
-    """웹 화면 표에서도 엑셀 배경색 태그(🔴빨강, 🟢초록, 🟡노랑 등)가 있는 셀에 배경 색상을 입혀 보여줍니다."""
     def _highlight_cell(val):
         s = str(val)
-        if "🔴" in s or "빨강" in s or "FAIL" in s.upper():
+        if "빨강" in s or "🔴" in s or "FAIL" in s.upper():
             return "background-color: #FEE2E2; color: #991B1B; font-weight: bold;"
-        if "🟢" in s or "초록" in s:
+        if "초록" in s or "🟢" in s:
             return "background-color: #DCFCE7; color: #166534; font-weight: bold;"
-        if "🟡" in s or "노랑" in s or "🟠" in s or "주황" in s:
+        if "노랑" in s or "주황" in s or "🟡" in s or "🟠" in s:
             return "background-color: #FEF9C3; color: #854D0E; font-weight: bold;"
         if "🎨" in s or "🔵" in s:
             return "background-color: #DBEAFE; color: #1E40AF; font-weight: bold;"
@@ -164,7 +159,6 @@ def style_dataframe_with_colors(df: pd.DataFrame):
 
 
 def build_smart_sql(nl_query: str, df: pd.DataFrame, table_name: str) -> str:
-    """한국어 자연어 질문을 분석해 SQLite 쿼리를 자동 생성합니다."""
     if not nl_query or not nl_query.strip():
         return f"SELECT * FROM {table_name} LIMIT 100;"
 
@@ -172,7 +166,7 @@ def build_smart_sql(nl_query: str, df: pd.DataFrame, table_name: str) -> str:
     col_matches: dict[str, list[str]] = {}
 
     if any(k in q for k in ["빨강", "빨간", "초록", "노랑", "배경", "색상", "색깔"]):
-        color_kw = "빨강" if ("빨강" in q or "빨간" in q) else ("초록" if "초록" in q else ("노랑" if "노랑" in q else "배경"))
+        color_kw = "빨강" if ("빨강" in q or "빨간" in q) else ("초록" if "초록" in q else ("노랑" if "노랑" in q else "강조"))
         or_likes = [f'"{col}" LIKE \'%{color_kw}%\'' for col in df.columns]
         return f"SELECT * FROM {table_name} WHERE " + " OR ".join(or_likes) + " LIMIT 100;"
 
@@ -180,7 +174,7 @@ def build_smart_sql(nl_query: str, df: pd.DataFrame, table_name: str) -> str:
     for col in str_cols:
         matched_vals = []
         for val in df[col].dropna().astype(str).unique():
-            val_clean = val.strip()
+            val_clean = re.sub(r"\s*\[[^\]]+\]", "", val).strip()
             if not val_clean or val_clean == "-" or len(val_clean) > 40:
                 continue
             if val_clean.lower() in q.lower() or f"{val_clean}{col}".lower() in q.lower():
@@ -191,10 +185,10 @@ def build_smart_sql(nl_query: str, df: pd.DataFrame, table_name: str) -> str:
     where_clauses = []
     for col, vals in col_matches.items():
         if len(vals) == 1:
-            where_clauses.append(f'"{col}" = \'{vals[0]}\'')
+            where_clauses.append(f'"{col}" LIKE \'%{vals[0]}%\'')
         else:
-            joined_vals = ", ".join(f"'{v}'" for v in vals)
-            where_clauses.append(f'"{col}" IN ({joined_vals})')
+            or_part = " OR ".join(f'"{col}" LIKE \'%{v}%\'' for v in vals)
+            where_clauses.append(f"({or_part})")
 
     num_cols = df.select_dtypes(include=["number"]).columns.tolist()
     nums = re.findall(r"\d+(?:\.\d+)?", q)
@@ -206,6 +200,8 @@ def build_smart_sql(nl_query: str, df: pd.DataFrame, table_name: str) -> str:
                 if ("불량" in q and "불량" in col) or ("생산" in q and "생산" in col) or ("가동" in q and "가동" in col):
                     target_col = col
                     break
+            if target_col is None:
+                target_col = num_cols[0]
         if target_col:
             if any(k in q for k in ["넘", "초과", "보다 큰", "많은", "높은", ">"]):
                 op = ">=" if "이상" in q else ">"
@@ -227,10 +223,6 @@ def build_smart_sql(nl_query: str, df: pd.DataFrame, table_name: str) -> str:
 
 
 def generate_smart_assistant_question(target_df: pd.DataFrame, raw_df: pd.DataFrame, user_filter_text: str) -> str:
-    """
-    데이터 유형(생산/품질 vs TC 절차서/일반 엑셀)을 자동 판별하여
-    억지 '자동화율(Auto vs Manual)' 질문 대신 데이터 성격에 꼭 맞는 분석 질문을 조합합니다.
-    """
     if len(target_df) == 0:
         return "현재 데이터의 핵심 현황, 이상·주의 항목, 원인 가설 및 실무 조치 제안을 정리해 줘."
 
@@ -247,7 +239,6 @@ def generate_smart_assistant_question(target_df: pd.DataFrame, raw_df: pd.DataFr
     stat_snippets = [f"총 {len(target_df)}건"]
     scope_title = " · ".join(scope_parts) if scope_parts else "현재 조회 데이터"
 
-    # 1) 생산/불량 수치 데이터인 경우
     if "생산량" in all_cols and "불량수" in all_cols:
         p_sum = int(target_df["생산량"].sum())
         d_sum = int(target_df["불량수"].sum())
@@ -260,12 +251,11 @@ def generate_smart_assistant_question(target_df: pd.DataFrame, raw_df: pd.DataFr
             f"③ 공정·설비·작업 관점 원인 가설, ④ 담당 부서별 즉시 조치(24h) 및 근본 대책(1개월)을 정밀 분석해 줘."
         )
 
-    # 2) TC 검증 절차서 데이터인 경우 (Auto_RTC 오판 방지 맞춤형 질문)
-    if any(k in cols_lower for k in ["procedure", "pass/fail", "actual", "precondition", "domain"]):
+    if any(k in cols_lower for k in ["procedure", "pass/fail", "actual", "precondition", "domain", "tc"]):
         row_text = target_df.astype(str).agg(" ".join, axis=1)
         red_cnt = int(row_text.str.contains("빨강|불합격|FAIL|주의", case=False, regex=True).sum())
         if red_cnt > 0:
-            stat_snippets.append(f"🔴빨강배경/주의 표시 {red_cnt}건 감지")
+            stat_snippets.append(f"🔴색상강조/주의 표시 {red_cnt}건 감지")
         for c_cand in ["Domain", "App"]:
             if c_cand in all_cols:
                 vals = [str(v) for v in target_df[c_cand].unique().tolist() if str(v) != "-"]
@@ -276,15 +266,14 @@ def generate_smart_assistant_question(target_df: pd.DataFrame, raw_df: pd.DataFr
             f"[AI 비서 자동 맞춤 질문] {scope_title} ({stat_str}) TC 검증 절차 데이터를 바탕으로 "
             f"① 도메인(Domain)·서브시스템(App/Module)별 분포와 비중(%), "
             f"② 주요 기능 시나리오(Video Encode 코덱별, Decode, Multiple Instances 등) 집중도 및 대표 TC(ID·Title), "
-            f"③ Actual Result 판정 현황(정상/🔴빨강배경 주의/미기입 공란) 및 예외·경계값 커버리지 리스크, "
+            f"③ Actual Result 판정 현황(정상/🔴빨강강조 주의/미기입 공란) 및 예외·경계값 커버리지 리스크, "
             f"④ QA·개발팀의 즉시 조치(24h) 및 검증 표준화 대책(1개월)을 마크다운 표 없이 깔끔한 불릿으로 분석해 줘."
         )
 
-    # 3) 기타 일반 범주형/문서 데이터인 경우
     stat_str = ", ".join(stat_snippets)
     return (
         f"[AI 비서 자동 맞춤 질문] {scope_title} ({stat_str}) 데이터를 바탕으로 "
-        f"① 시트·분류별 핵심 현황 및 비중(%), ② 색상 강조(🔴주의) 또는 미기입 항목 점검, "
+        f"① 시트·분류별 핵심 현황 및 비중(%), ② 색상 강조(🎨주의) 또는 미기입 항목 점검, "
         f"③ 주요 리스크 및 원인 가설, ④ 실무 조치 제안(24h/1개월)을 정리해 줘."
     )
 
@@ -317,13 +306,13 @@ def render_related_links_box(target_df: pd.DataFrame):
     elif "App" in all_cols or "Domain" in all_cols:
         for c in ["Domain", "App"]:
             if c in all_cols:
-                vals = [v for v in target_df[c].astype(str).unique() if v != "-"]
+                vals = [str(v) for v in target_df[c].astype(str).unique() if str(v) != "-"]
                 keywords.extend(vals[:1])
         keywords.append("비디오 코덱 검증 테스트")
     else:
         cat_cols = target_df.select_dtypes(include=["object", "category"]).columns.tolist()
         if cat_cols:
-            vals = [v for v in target_df[cat_cols[0]].astype(str).unique() if v != "-"]
+            vals = [str(v) for v in target_df[cat_cols[0]].astype(str).unique() if str(v) != "-"]
             keywords.extend(vals[:2])
 
     search_query = " ".join(keywords[:3]) if keywords else "사내 데이터 품질 관리 자동화"
@@ -352,7 +341,6 @@ def render_related_links_box(target_df: pd.DataFrame):
 
 
 def render_smart_charts(target_df: pd.DataFrame, key_prefix: str = "main"):
-    """수치형 데이터와 텍스트/TC 범주형 데이터를 자동 구분하여 4대 다차원 차트를 생성합니다."""
     if len(target_df) == 0:
         st.info("조회된 데이터가 없습니다.")
         return
@@ -435,11 +423,9 @@ def render_smart_charts(target_df: pd.DataFrame, key_prefix: str = "main"):
                 st.plotly_chart(fig4, use_container_width=True, key=f"{key_prefix}_num4")
         return
 
-    st.caption("📊 **텍스트·범주형 문서(TC 검증 절차서 등)가 감지되어 [도메인/분류 건수 · 판정/배경색 비중 · 컬럼별 작성률] 다차원 시각화로 자동 전환되었습니다.**")
-
-    primary_cat = next((c for c in ["시트명", "App", "Domain", "분류", "부서"] if c in all_cols), all_cols[0])
-    secondary_cat = next((c for c in ["Domain", "App", "Pass/Fail Criteria", "Precondition"] if c in all_cols and c != primary_cat), all_cols[min(1, len(all_cols) - 1)])
-    result_col = next((c for c in all_cols if any(k in c.lower() for k in ["actual", "result", "결과", "판정", "상태"])), all_cols[-1])
+    primary_cat = next((c for c in ["App", "Domain", "Category", "시트명", "구분", "분류"] if c in all_cols), all_cols[0])
+    secondary_cat = next((c for c in ["Domain", "App", "Pass/Fail Criteria", "Precondition", "시트명"] if c in all_cols and c != primary_cat), all_cols[min(1, len(all_cols) - 1)])
+    result_col = next((c for c in all_cols if any(k in c.lower() for k in ["actual", "result", "status", "결과", "판정", "상태"])), all_cols[-1])
 
     r1_c1, r1_c2 = st.columns(2)
     with r1_c1:
@@ -453,7 +439,6 @@ def render_smart_charts(target_df: pd.DataFrame, key_prefix: str = "main"):
             title=f"① [{primary_cat}]별 데이터 건수 및 비중(%) 현황",
         )
         fig_c1.update_traces(textposition="outside")
-        fig_c1.update_layout(yaxis_title="데이터 건수 (건)", margin=dict(t=50, b=20))
         st.plotly_chart(fig_c1, use_container_width=True, key=f"{key_prefix}_cat1")
 
     with r1_c2:
@@ -461,8 +446,8 @@ def render_smart_charts(target_df: pd.DataFrame, key_prefix: str = "main"):
         vc_res.columns = [result_col, "건수"]
         fig_c2 = px.pie(
             vc_res.head(10), names=result_col, values="건수", hole=0.4,
-            color_discrete_sequence=["#DC2626", "#2563EB", "#059669", "#D97706", "#7C3AED"],
-            title=f"② [{result_col}] 판정 · 셀 배경색(🔴빨강 등) 및 기재 상태 비중",
+            color_discrete_sequence=["#059669", "#2563EB", "#DC2626", "#D97706", "#7C3AED"],
+            title=f"② [{result_col}] 판정 · 셀 배경색 및 기재 상태 비중",
         )
         fig_c2.update_traces(textinfo="label+percent+value")
         st.plotly_chart(fig_c2, use_container_width=True, key=f"{key_prefix}_cat2")
@@ -472,12 +457,12 @@ def render_smart_charts(target_df: pd.DataFrame, key_prefix: str = "main"):
         comp_rows = []
         for col in all_cols:
             s_str = target_df[col].astype(str).str.strip()
-            empty_c = int(s_str.isin(["-", "", "None", "nan"]).sum())
-            color_c = int(s_str.str.contains("배경|빨강|초록|노랑|주황", regex=True).sum())
+            empty_c = int(s_str.isin(["-", "", "None", "nan"]).sum() + s_str.str.startswith("[빈칸").sum())
+            color_c = int(s_str.str.contains("🎨|빨강|초록|노랑|주황", regex=True).sum())
             normal_c = max(0, len(target_df) - empty_c - color_c)
             comp_rows.append({"컬럼명": col, "구분": "일반 텍스트 기재", "건수": normal_c})
             if color_c > 0:
-                comp_rows.append({"컬럼명": col, "구분": "🔴 색상강조/배경표시", "건수": color_c})
+                comp_rows.append({"컬럼명": col, "구분": "🎨 색상강조/배경표시", "건수": color_c})
             if empty_c > 0:
                 comp_rows.append({"컬럼명": col, "구분": "⚪ 미기재(빈칸)", "건수": empty_c})
         comp_df = pd.DataFrame(comp_rows)
@@ -485,10 +470,10 @@ def render_smart_charts(target_df: pd.DataFrame, key_prefix: str = "main"):
             comp_df, x="컬럼명", y="건수", color="구분", barmode="stack", text_auto=True,
             color_discrete_map={
                 "일반 텍스트 기재": "#059669",
-                "🔴 색상강조/배경표시": "#DC2626",
+                "🎨 색상강조/배경표시": "#DC2626",
                 "⚪ 미기재(빈칸)": "#9CA3AF",
             },
-            title="③ 컬럼별 데이터 작성 현황 (텍스트 기재 vs 🔴색상표시 vs ⚪미기재)",
+            title="③ 컬럼별 데이터 작성 현황 (텍스트 기재 vs 🎨색상표시 vs ⚪미기재)",
         )
         st.plotly_chart(fig_c3, use_container_width=True, key=f"{key_prefix}_cat3")
 
@@ -537,19 +522,18 @@ def show_model_visual_popup(m_code: str, res_data: dict, target_df: pd.DataFrame
 
 
 @st.fragment
-def render_visualization_fragment(target_df: pd.DataFrame):
+def render_visualization_fragment(target_df: pd.DataFrame, aux_sheets: dict[str, pd.DataFrame]):
     st.subheader("2️⃣ 조회된 데이터 다차원 시각화 & 한글 기초통계 집계")
     v_tab1, v_tab2, v_tab3 = st.tabs([
         "🎯 핵심 다차원 대시보드 (수치형·범주형·배경색 자동 대응)",
-        "🛠️ 자유 조합 커스텀 차트 (모든 엑셀/CSV 범용)",
-        "📋 한글 기초통계 & 시트·분류·판정별 집계표 (엑셀 2번 시트)",
+        "🛠️ 자유 조합 커스텀 차트 (모든 엑셀/CSV/문서 범용)",
+        "📋 한글 기초통계 & 시트통합·판정·배경색 문맥 집계표",
     ])
 
     with v_tab1:
         render_smart_charts(target_df, key_prefix="main_dash")
 
     with v_tab2:
-        st.caption("💡 숫자 컬럼이 없는 텍스트 엑셀 파일도 **[건수 (COUNT)]** 집계로 모든 컬럼을 막대 차트로 비교할 수 있습니다.")
         num_cols = target_df.select_dtypes(include=["number"]).columns.tolist()
         all_cols = target_df.columns.tolist()
         if len(target_df) > 0:
@@ -588,8 +572,7 @@ def render_visualization_fragment(target_df: pd.DataFrame):
             st.plotly_chart(fig_custom, use_container_width=True, key="frag_custom_chart")
 
     with v_tab3:
-        st.caption("엑셀 `2_기초통계_및_집계` 시트에 요약 차트와 함께 기록되는 100% 한글 집계표입니다.")
-        korean_tables = build_korean_stat_tables(target_df)
+        korean_tables = build_korean_stat_tables(target_df, aux_sheets=aux_sheets)
         for t_title, t_df in korean_tables.items():
             st.markdown(f"**■ {t_title}**")
             st.dataframe(style_dataframe_with_colors(t_df), use_container_width=True, hide_index=True)
@@ -601,6 +584,7 @@ def render_agent_analysis_section(
     summary_df: pd.DataFrame,
     selected_models: list[str],
     active_filter_text: str,
+    aux_sheets: dict[str, pd.DataFrame],
 ):
     st.subheader("3️⃣ AI 비서 맞춤 질문 & 에이전트 동시 비교 분석 (Groq vs Gemini vs Ollama 정밀 모드)")
 
@@ -629,7 +613,8 @@ def render_agent_analysis_section(
         else:
             agent_app = build_agent_graph()
             stat_summary_str = "\n\n".join(
-                f"■ {k}\n{v.to_string(index=False)}" for k, v in build_korean_stat_tables(target_df).items()
+                f"■ {k}\n{v.to_string(index=False)}"
+                for k, v in build_korean_stat_tables(target_df, aux_sheets=aux_sheets).items()
             )
             sample_rows_df = target_df.head(50)
             data_info = (
@@ -656,7 +641,9 @@ def render_agent_analysis_section(
                     "report": "",
                     "elapsed_time": 0.0,
                 })
-                excel_bytes = export_analysis_to_excel(target_df, summary_df, res["report"], res["elapsed_time"], m_code)
+                excel_bytes = export_analysis_to_excel(
+                    target_df, summary_df, res["report"], res["elapsed_time"], m_code, aux_sheets=aux_sheets
+                )
                 res["excel_bytes"] = excel_bytes
                 return m_code, res
 
@@ -675,14 +662,15 @@ def render_agent_analysis_section(
 
             st.session_state["saved_results"] = new_results
             st.session_state["last_analyzed_df"] = target_df
+            st.session_state["last_aux_sheets"] = aux_sheets
             st.session_state["pipeline_logs"] = logs
-            # 상단 파이프라인 가동현황의 4번·5번 배지를 즉시 초록색(완료)으로 전환하기 위해 화면 리렌더링
             st.rerun()
 
     saved = st.session_state.get("saved_results", {})
     if saved:
         display_models = [m for m in selected_models if m in saved] or list(saved.keys())
         popup_df = st.session_state.get("last_analyzed_df") if st.session_state.get("last_analyzed_df") is not None else target_df
+        saved_aux = st.session_state.get("last_aux_sheets", aux_sheets)
 
         st.markdown("##### ⚖️ AI 모델별 성능(응답 속도) 및 핵심 진단 한눈에 비교")
         matrix_rows = []
@@ -699,7 +687,7 @@ def render_agent_analysis_section(
             })
         st.dataframe(pd.DataFrame(matrix_rows), use_container_width=True, hide_index=True)
 
-        combined_excel_bytes = export_combined_analysis_to_excel(popup_df, saved, MODEL_LABELS)
+        combined_excel_bytes = export_combined_analysis_to_excel(popup_df, saved, MODEL_LABELS, aux_sheets=saved_aux)
         top_c1, top_c2 = st.columns([2, 1])
         with top_c1:
             st.caption("👆 **각 모델의 제목 버튼을 클릭하면 상세 다차원 시각화 팝업창이 열립니다.**")
@@ -756,11 +744,6 @@ with st.sidebar:
     st.divider()
     ollama_models = get_installed_ollama_models()
     with st.expander("🖥️ 로컬 Ollama 상세 설정 & 모델 안내 (클릭)", expanded=False):
-        st.markdown(
-            "**💡 로컬 Ollama 정밀 모드란?**\n"
-            "- **보안:** 사내 데이터를 외부 인터넷으로 전송하지 않고 내 PC 안에서만 2단계(Analyzer → Reporter) 정밀 분석을 수행합니다.\n"
-            "- **자동 양식 정제:** 수치 붙음 방지 및 `<br>` 태그 제거가 자동 적용됩니다."
-        )
         chosen_ollama = st.selectbox("구동할 로컬 모델 변경", options=ollama_models, index=0)
         os.environ["LOCAL_MODEL_NAME"] = chosen_ollama
 
@@ -773,33 +756,42 @@ with st.sidebar:
 # =====================================================================
 # 📂 메인 화면: 파일 업로드 및 1~3단계 워크플로우
 # =====================================================================
-uploaded_file = st.file_uploader("📂 사내 데이터 파일(CSV, Excel) 업로드 (다중 시트 & 셀 배경색 자동 인식)", type=["csv", "xlsx"])
+uploaded_file = st.file_uploader(
+    "📂 사내 데이터·문서 파일(CSV, Excel, Word .docx, TXT) 업로드 (다중 시트 & 셀 배경색 자동 인식)",
+    type=["csv", "xlsx", "docx", "txt"],
+)
 
 if uploaded_file is None:
     render_pipeline_status(has_file=False, has_query_df=False, saved_results={})
-    st.info("👆 분석할 사내 CSV 또는 Excel(.xlsx) 파일을 업로드하면 1~5단계 실시간 파이프라인이 가동됩니다.")
+    st.info("👆 분석할 사내 파일(.csv, .xlsx, .docx, .txt)을 업로드하면 1~5단계 실시간 파이프라인이 가동됩니다.")
 else:
-    raw_df_all, sheet_names, sheet_counts = load_and_sync_to_db(uploaded_file, selected_sheet="ALL")
+    # 4개 반환값(raw_df_all, sheet_names, sheet_counts, aux_sheets) 정확히 언패킹
+    raw_df_all, sheet_names, sheet_counts, aux_sheets = load_and_sync_to_db(uploaded_file, selected_sheet="ALL")
 
     if len(sheet_names) > 1:
         sheet_summary = " | ".join(f"**{s}**: {cnt}건" for s, cnt in sheet_counts.items())
-        st.info(f"📑 **다중 시트 엑셀 파일 감지 (총 {len(sheet_names)}개 시트, 합계 {len(raw_df_all)}건):** {sheet_summary}")
+        st.info(f"📑 **다중 시트/표 감지 (총 {len(sheet_names)}개 시트, 메인 분석 대상 {len(raw_df_all)}건):** {sheet_summary}")
         sheet_options = ["ALL"] + sheet_names
         chosen_sheet = st.radio(
-            "조회할 엑셀 시트 범위 선택:",
+            "조회할 시트 범위 선택:",
             options=sheet_options,
             index=0,
-            format_func=lambda x: f"📚 전체 시트 통합 조회 (총 {len(raw_df_all)}건)" if x == "ALL" else f"📄 {x} ({sheet_counts.get(x, 0)}건)",
+            format_func=lambda x: f"📚 메인 시트 통합 조회 (총 {len(raw_df_all)}건)" if x == "ALL" else f"📄 {x} ({sheet_counts.get(x, 0)}건)",
             horizontal=True,
         )
         if chosen_sheet == "ALL":
             raw_df = raw_df_all
         else:
-            raw_df, _, _ = load_and_sync_to_db(uploaded_file, selected_sheet=chosen_sheet)
+            raw_df, _, _, _ = load_and_sync_to_db(uploaded_file, selected_sheet=chosen_sheet)
     else:
         raw_df = raw_df_all
 
-    # 상단 실시간 파이프라인 가동현황 배지 출력 (분석 완료 시 1~5번 모두 초록색으로 표시됨)
+    if aux_sheets:
+        with st.expander(f"📎 보조 시트({', '.join(aux_sheets.keys())}) 원문 보기 (메인 집계 건수 오염 방지를 위해 자동 분리됨)", expanded=False):
+            for a_name, a_df in aux_sheets.items():
+                st.markdown(f"**■ 시트명: `{a_name}`**")
+                st.dataframe(style_dataframe_with_colors(a_df), use_container_width=True, hide_index=True)
+
     render_pipeline_status(
         has_file=True,
         has_query_df=len(raw_df) > 0,
@@ -816,12 +808,12 @@ else:
             f"테이블(`{TABLE_NAME}`) 컬럼: `{list(raw_df.columns)}` | "
             "입력 예시: **'빨강 배경만 조회해줘'**, **'Video만 보여줘'**, **'A라인랑 B라인 조회해줘'**"
         )
-        nl_question = st.text_input("조회 조건을 자연어로 입력하세요 (비워두면 전체 시트 데이터를 분석합니다):", value="")
+        nl_question = st.text_input("조회 조건을 자연어로 입력하세요 (비워두면 전체 데이터를 분석합니다):", value="")
         auto_sql = build_smart_sql(nl_question, raw_df, TABLE_NAME)
         st.code(auto_sql, language="sql")
         try:
             df = run_sql_query(auto_sql)
-            st.success(f"✅ SQL 자동 실행 완료: 전체 **{len(raw_df)}건** 중 **{len(df)}건** 조회됨 (셀 배경색 자동 표시 적용)")
+            st.success(f"✅ SQL 자동 실행 완료: 전체 **{len(raw_df)}건** 중 **{len(df)}건** 조회됨")
             st.dataframe(style_dataframe_with_colors(df), use_container_width=True, hide_index=True)
             if nl_question.strip():
                 active_filter_text = nl_question.strip()
@@ -874,6 +866,6 @@ else:
     summary_df = target_df.describe(include="all").fillna("")
     st.divider()
 
-    render_visualization_fragment(target_df)
+    render_visualization_fragment(target_df, aux_sheets)
     st.divider()
-    render_agent_analysis_section(target_df, raw_df, summary_df, selected_models, active_filter_text)
+    render_agent_analysis_section(target_df, raw_df, summary_df, selected_models, active_filter_text, aux_sheets)

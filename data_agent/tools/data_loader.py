@@ -1,44 +1,44 @@
+# data_agent/tools/data_loader.py
 import io
 import re
 import sqlite3
 import zipfile
 import xml.etree.ElementTree as ET
-import pandas as pd
-import openpyxl
 from pathlib import Path
 from datetime import datetime
+import pandas as pd
+import openpyxl
 
 DB_PATH = Path("internal_analysis.db")
 TABLE_NAME = "internal_data"
 
-AUX_SHEET_KEYWORDS = [
-    "summary", "요약", "environment", "환경", "cover", "표지", "개요",
-    "설명", "info", "guide", "가이드", "목차", "history", "이력", "변경이력", "coverage"
-]
 
-# TC 절차서/명세서의 긴 설명 컬럼 목록 (단순 양식 배경색을 불합격/강조로 오판하지 않도록 보호)
-SPEC_TEXT_COLUMNS = {
-    "procedure", "pass/fail criteria", "pre-condition", "precondition",
-    "post-condition", "postcondition", "description", "purpose", "inputdata",
-    "input data", "expected result", "test step", "steps", "title", "_polarion"
-}
-
-
-def clean_polarion_xml_text(text: str) -> str:
-    """
-    사내 Polarion / ALM 엑셀 내보내기 파일에 포함된 '_x000D_', '_x000A_' 개행 기호와
-    '##################'` 같은 불필요한 구분선을 깔끔하게 정제합니다.
-    """
-    if not text or not isinstance(text, str):
-        return str(text or "")
-    s = re.sub(r"(_x000[dDaA9]_)+", " ", text)
-    s = re.sub(r"[#=*]{5,}", " | ", s)
-    s = re.sub(r"\s{2,}", " ", s).strip()
+def _safe_str(val) -> str:
+    """None, NaN, float 등 어떤 타입이 들어와도 안전하게 문자열로 변환합니다 (Pandas 3.0 호환)."""
+    if val is None:
+        return "-"
+    try:
+        if pd.isna(val):
+            return "-"
+    except Exception:
+        pass
+    s = str(val).strip()
+    if s.lower() in ("", "none", "nan", "null", "<na>"):
+        return "-"
     return s
 
 
+def _strip_color_tag(val) -> str:
+    """셀 값에서 [🎨...] 또는 [🔴...] 색상 태그만 안전하게 제거합니다."""
+    s = _safe_str(val)
+    if s == "-":
+        return "-"
+    cleaned = re.sub(r"\s*\[(?:🎨|🔴|🟠|🟡|🟢|🔵|🟣|빈칸)[^\]]*\]", "", s).strip()
+    return cleaned if cleaned else "-"
+
+
 def _classify_rgb_color(rgb_hex: str) -> str | None:
-    """셀 배경색을 선입견 없이 순수 시각적 강조 태그로 반환합니다."""
+    """엑셀 셀의 ARGB/RGB 16진수 색상 코드를 분석하여 색상 강조 태그를 반환합니다."""
     if not rgb_hex or not isinstance(rgb_hex, str):
         return None
     clean_hex = rgb_hex.strip().upper()
@@ -55,9 +55,8 @@ def _classify_rgb_color(rgb_hex: str) -> str | None:
     except ValueError:
         return None
 
+    # 흰색 또는 아주 연한 회색 배경은 무시
     if r > 240 and g > 240 and b > 240:
-        return None
-    if abs(r - g) < 12 and abs(g - b) < 12 and r > 210:
         return None
 
     if r > 180 and g < 130 and b < 130:
@@ -66,17 +65,31 @@ def _classify_rgb_color(rgb_hex: str) -> str | None:
         return "🎨주황강조"
     if r > 200 and g >= 185 and b < 150:
         return "🎨노랑강조"
-    if g > 160 and r < 150 and b < 160:
+    if g > 160 and r < 160 and b < 160:
         return "🎨초록강조"
-    if b > 170 and r < 150 and g < 185:
+    if b > 170 and r < 160 and g < 185:
         return "🎨파랑강조"
-    if r > 160 and b > 160 and g < 140:
+    if r > 150 and b > 150 and g < 140:
         return "🎨보라강조"
     return None
 
 
+def _is_aux_sheet(sheet_name: str, df: pd.DataFrame) -> bool:
+    """Summary, Environment, 표지, 이력 등 보조 설명 시트인지 판별합니다."""
+    s_low = sheet_name.strip().lower()
+    aux_keywords = ["summary", "env", "environment", "cover", "history", "revision", "info", "요약", "환경", "표지", "이력", "개요"]
+    if any(k in s_low for k in aux_keywords):
+        return True
+    if len(df) <= 3 and len(df.columns) <= 3:
+        return True
+    return False
+
+
 def _read_excel_sheet_with_colors(wb: openpyxl.Workbook, sheet_name: str) -> pd.DataFrame:
-    """시트의 셀 값(Polarion _x000D_ 정제 포함)과 의미 있는 배경색 강조 태그를 읽어 DataFrame으로 변환합니다."""
+    """
+    openpyxl로 시트를 읽어 셀 텍스트와 배경색(🎨빨강강조 등)을 추출하고,
+    Pandas 3.0에서도 float('nan') 에러가 절대 발생하지 않도록 안전하게 정제합니다.
+    """
     ws = wb[sheet_name]
     rows_data = []
 
@@ -85,7 +98,7 @@ def _read_excel_sheet_with_colors(wb: openpyxl.Workbook, sheet_name: str) -> pd.
         has_any_content = False
         for cell in row:
             raw_val = cell.value
-            val_str = "" if raw_val is None else clean_polarion_xml_text(str(raw_val))
+            val_str = "" if raw_val is None else str(raw_val).strip()
             if val_str.lower() in ("none", "nan", "null"):
                 val_str = ""
 
@@ -97,19 +110,19 @@ def _read_excel_sheet_with_colors(wb: openpyxl.Workbook, sheet_name: str) -> pd.
                     rgb_val = getattr(fg, "rgb", None)
                     if isinstance(rgb_val, str):
                         color_tag = _classify_rgb_color(rgb_val)
+                    elif getattr(fg, "theme", None) is not None:
+                        theme_idx = fg.theme
+                        if theme_idx in (4, 5):
+                            color_tag = "🎨빨강강조"
 
             if val_str and color_tag:
-                # 긴 절차서 문장(80자 이상)은 단순 서식 배경색일 수 있으므로 색상 태그 부착 제외
-                if cell.row == 1 or len(val_str) > 80:
-                    final_val = val_str
-                else:
-                    final_val = f"{val_str} [{color_tag}]"
+                final_val = val_str if cell.row == 1 else f"{val_str} [{color_tag}]"
                 has_any_content = True
             elif not val_str and color_tag:
                 final_val = f"[빈칸·{color_tag}]"
                 has_any_content = True
             elif val_str:
-                final_val = raw_val if isinstance(raw_val, (int, float)) else val_str
+                final_val = raw_val if isinstance(raw_val, (int, float)) and not pd.isna(raw_val) else val_str
                 has_any_content = True
             else:
                 final_val = None
@@ -122,19 +135,21 @@ def _read_excel_sheet_with_colors(wb: openpyxl.Workbook, sheet_name: str) -> pd.
     if not rows_data:
         return pd.DataFrame()
 
+    # 가장 내용이 충실한 상단 행(1~5행 중)을 헤더로 자동 탐색
     header_idx = 0
+    best_non_empty = 0
     for idx in range(min(5, len(rows_data))):
-        non_empty = sum(1 for x in rows_data[idx] if x is not None and not str(x).startswith("[빈칸"))
-        if non_empty >= 3:
+        non_empty = sum(1 for v in rows_data[idx] if v is not None and not str(v).startswith("[빈칸"))
+        if non_empty > best_non_empty:
+            best_non_empty = non_empty
             header_idx = idx
-            break
 
     raw_headers = rows_data[header_idx]
     headers = []
     seen = {}
     for idx, h in enumerate(raw_headers):
-        h_clean = re.sub(r"\s*\[🎨[^\]]+\]", "", clean_polarion_xml_text(str(h or ""))).strip()
-        h_name = h_clean if h_clean else f"항목_{idx + 1}"
+        h_clean = _strip_color_tag(h)
+        h_name = h_clean if h_clean != "-" else f"컬럼_{idx + 1}"
         if h_name in seen:
             seen[h_name] += 1
             h_name = f"{h_name}_{seen[h_name]}"
@@ -142,252 +157,153 @@ def _read_excel_sheet_with_colors(wb: openpyxl.Workbook, sheet_name: str) -> pd.
             seen[h_name] = 1
         headers.append(h_name)
 
-    df = pd.DataFrame(rows_data[header_idx + 1 :], columns=headers)
+    data_rows = rows_data[header_idx + 1 :]
+    if not data_rows:
+        return pd.DataFrame(columns=headers)
+
+    df = pd.DataFrame(data_rows, columns=headers)
     df = df.dropna(how="all", axis=1).dropna(how="all", axis=0)
 
-    # 절차/설명 전용 컬럼(Procedure, PASS/FAIL Criteria 등)에 붙은 불필요한 배경색 태그 제거
+    # 모든 컬럼을 안전하게 순회하며 수치형 변환 가능 여부 확인 (TypeError 원천 방지)
     for col in df.columns:
-        if col.lower().strip() in SPEC_TEXT_COLUMNS:
-            df[col] = df[col].astype(str).apply(lambda x: re.sub(r"\s*\[🎨[^\]]+\]", "", x).strip())
+        safe_series = pd.Series([_safe_str(v) for v in df[col]], index=df.index, dtype=object)
+        has_color = safe_series.str.contains(r"\[(?:🎨|🔴|빈칸)", regex=True, na=False).any()
 
-    for col in df.columns:
-        try:
-            converted = pd.to_numeric(df[col])
-            if converted.notna().sum() > 0 and converted.notna().sum() == df[col].notna().sum():
-                df[col] = converted
-        except Exception:
-            pass
+        if not has_color:
+            stripped = safe_series.map(_strip_color_tag)
+            non_dash = stripped[stripped != "-"]
+            if len(non_dash) > 0:
+                converted = pd.to_numeric(non_dash, errors="coerce")
+                # 비어 있지 않은 모든 값이 숫자인 경우에만 수치형으로 변환
+                if converted.notna().all() and len(non_dash) == len(df):
+                    df[col] = pd.to_numeric(stripped, errors="coerce")
+                    continue
 
-    for col in df.select_dtypes(include=["object"]).columns:
-        df[col] = df[col].fillna("-").astype(str).replace({"None": "-", "nan": "-", "": "-"})
+        df[col] = safe_series
 
     return df
 
 
-def _parse_docx_bytes(
-    file_bytes: bytes, selected_sheet: str = "AUTO_MAIN"
-) -> tuple[pd.DataFrame, list[str], dict[str, int], dict[str, pd.DataFrame]]:
-    """Word(.docx) 문서에서 본문 문단과 문서 내 표(Table)를 추출하여 정형 테이블로 변환합니다."""
+def _read_docx_file(file_bytes: bytes) -> tuple[pd.DataFrame, list[str], dict[str, int], dict[str, pd.DataFrame]]:
+    """외부 패키지 없이 표준 zipfile+XML 파서로 워드(.docx) 문단과 내장 표를 추출합니다."""
+    paragraphs = []
+    tables_dfs = []
     ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
-    with zipfile.ZipFile(io.BytesIO(file_bytes)) as z:
-        xml_content = z.read("word/document.xml")
-    tree = ET.fromstring(xml_content)
-    body = tree.find("w:body", ns)
 
-    para_rows = []
-    current_section = "1. 문서 도입부"
-    para_idx = 0
+    try:
+        with zipfile.ZipFile(io.BytesIO(file_bytes)) as zf:
+            if "word/document.xml" in zf.namelist():
+                xml_content = zf.read("word/document.xml")
+                root = ET.fromstring(xml_content)
 
-    if body is not None:
-        for p in body.findall("w:p", ns):
-            texts = [t.text for t in p.findall(".//w:t", ns) if t.text]
-            full_text = clean_polarion_xml_text(" ".join("".join(texts).split()))
-            if not full_text:
-                continue
+                # 1. 본문 문단 추출
+                for idx, p in enumerate(root.findall(".//w:body/w:p", ns), start=1):
+                    texts = [t.text for t in p.findall(".//w:t", ns) if t.text]
+                    full_txt = "".join(texts).strip()
+                    if full_txt:
+                        p_type = "제목/헤더" if len(full_txt) < 40 and (full_txt.startswith(("[", "■", "1.", "2.", "3.", "4.")) or ":" in full_txt) else "본문 문단"
+                        paragraphs.append({"순번": idx, "구분": p_type, "내용": full_txt})
 
-            pStyle = p.find(".//w:pStyle", ns)
-            style_val = pStyle.attrib.get(f"{{{ns['w']}}}val", "") if pStyle is not None else ""
-            is_heading = (
-                "Heading" in style_val
-                or "제목" in style_val
-                or (
-                    len(full_text) <= 50
-                    and full_text.startswith(("01", "02", "03", "04", "05", "1.", "2.", "3.", "4.", "5.", "■", "▶", "I.", "II."))
-                )
-            )
-            if is_heading and len(full_text) <= 55:
-                current_section = full_text
-                continue
+                # 2. 워드 내장 표(Table) 추출
+                for t_idx, tbl in enumerate(root.findall(".//w:body/w:tbl", ns), start=1):
+                    t_rows = []
+                    for tr in tbl.findall(".//w:tr", ns):
+                        cells = []
+                        for tc in tr.findall(".//w:tc", ns):
+                            c_texts = [t.text for t in tc.findall(".//w:t", ns) if t.text]
+                            cells.append(" ".join("".join(c_texts).split()) or "-")
+                        if any(c != "-" for c in cells):
+                            t_rows.append(cells)
+                    if len(t_rows) >= 2:
+                        headers = [f"{h}_{i}" if t_rows[0].count(h) > 1 else h for i, h in enumerate(t_rows[0])]
+                        t_df = pd.DataFrame(t_rows[1:], columns=headers)
+                        tables_dfs.append((f"워드표_{t_idx}", t_df))
+    except Exception:
+        pass
 
-            para_idx += 1
-            if any(k in full_text for k in ["불량", "오류", "에러", "문제", "실패", "주의", "미흡", "지연", "초과", "위험", "개선"]):
-                status_tag = "🚨 중점/이슈 사항"
-            elif any(k in full_text for k in ["완료", "성공", "정상", "PASS", "달성", "양호", "확보"]):
-                status_tag = "✅ 완료/양호 사항"
-            else:
-                status_tag = "📌 일반 설명/현황"
+    main_df = pd.DataFrame(paragraphs) if paragraphs else pd.DataFrame([{"순번": 1, "구분": "알림", "내용": "추출된 텍스트가 없습니다."}])
+    sheet_names = ["본문_문단"]
+    sheet_counts = {"본문_문단": len(main_df)}
+    aux_sheets = {}
 
-            para_rows.append({
-                "문단ID": f"DOC-{para_idx:03d}",
-                "문서 섹션(목차)": current_section[:45],
-                "핵심 분류": status_tag,
-                "본문 상세 내용": full_text,
-                "글자수": len(full_text),
-            })
-
-    table_dfs: dict[str, pd.DataFrame] = {}
-    if body is not None:
-        for t_idx, tbl in enumerate(body.findall("w:tbl", ns), start=1):
-            t_rows = []
-            for tr in tbl.findall("w:tr", ns):
-                row_cells = []
-                for tc in tr.findall("w:tc", ns):
-                    cell_texts = [t.text for t in tc.findall(".//w:t", ns) if t.text]
-                    row_cells.append(clean_polarion_xml_text(" ".join("".join(cell_texts).split())) or "-")
-                if any(c != "-" for c in row_cells):
-                    t_rows.append(row_cells)
-            if len(t_rows) >= 2:
-                max_cols = max(len(r) for r in t_rows)
-                norm_rows = [r + ["-"] * (max_cols - len(r)) for r in t_rows]
-                seen = {}
-                clean_headers = []
-                for idx_h, h in enumerate(norm_rows[0]):
-                    h_name = h[:30] if h and h != "-" else f"열_{idx_h + 1}"
-                    if h_name in seen:
-                        seen[h_name] += 1
-                        h_name = f"{h_name}_{seen[h_name]}"
-                    else:
-                        seen[h_name] = 1
-                    clean_headers.append(h_name)
-                t_df = pd.DataFrame(norm_rows[1:], columns=clean_headers)
-                t_name = f"워드내장표_{t_idx}"
-                table_dfs[t_name] = t_df
-
-    para_df = pd.DataFrame(para_rows)
-    sheet_names = []
-    sheet_counts = {}
-    aux_sheets: dict[str, pd.DataFrame] = {}
-
-    if len(para_df) > 0:
-        sheet_names.append("워드_본문문단")
-        sheet_counts["워드_본문문단"] = len(para_df)
-
-    for t_name, t_df in table_dfs.items():
+    for t_name, t_df in tables_dfs:
         sheet_names.append(t_name)
         sheet_counts[t_name] = len(t_df)
         aux_sheets[t_name] = t_df
 
-    if selected_sheet in table_dfs:
-        main_df = table_dfs[selected_sheet].copy()
-        if len(para_df) > 0:
-            aux_sheets["워드_본문문단"] = para_df
-        aux_sheets.pop(selected_sheet, None)
-    elif len(para_df) > 0:
-        main_df = para_df
-    elif table_dfs:
-        first_tbl = next(iter(table_dfs.keys()))
-        main_df = table_dfs[first_tbl].copy()
-        aux_sheets.pop(first_tbl, None)
-    else:
-        main_df = pd.DataFrame([{"문단ID": "DOC-001", "문서 섹션(목차)": "빈 문서", "핵심 분류": "일반", "본문 상세 내용": "내용 없음", "글자수": 0}])
-
     return main_df, sheet_names, sheet_counts, aux_sheets
 
 
-def _parse_text_bytes(
-    file_bytes: bytes, file_name: str
-) -> tuple[pd.DataFrame, list[str], dict[str, int], dict[str, pd.DataFrame]]:
-    """텍스트(.txt) 및 마크다운(.md) 문서를 섹션별·문단별 정형 테이블로 변환합니다."""
-    try:
-        text = file_bytes.decode("utf-8")
-    except UnicodeDecodeError:
-        text = file_bytes.decode("cp949", errors="replace")
-
-    rows = []
-    current_sec = "문서 시작부"
-    idx = 0
-    for raw_line in text.splitlines():
-        line = clean_polarion_xml_text(raw_line)
-        if not line or re.match(r"^[=\-*_#\s]+$", line):
-            continue
-        if line.startswith("#") or (len(line) <= 45 and re.match(r"^(?:\d+\.|\[|■|▶)", line)):
-            current_sec = line.lstrip("# ").strip()
-            continue
-        idx += 1
-        status_tag = "🚨 중점/이슈 사항" if any(k in line for k in ["불량", "오류", "에러", "문제", "실패", "주의", "미흡", "초과"]) else "✅ 일반 내용"
-        rows.append({
-            "행ID": f"TXT-{idx:03d}",
-            "문서 섹션(목차)": current_sec[:45],
-            "핵심 분류": status_tag,
-            "본문 상세 내용": line,
-            "글자수": len(line),
-        })
-
-    df = pd.DataFrame(rows) if rows else pd.DataFrame([{"행ID": "TXT-001", "문서 섹션(목차)": "기본", "핵심 분류": "일반", "본문 상세 내용": "내용 없음", "글자수": 0}])
-    s_name = f"텍스트문서({Path(file_name).suffix})"
-    return df, [s_name], {s_name: len(df)}, {}
-
-
-def _is_aux_sheet(sheet_name: str, df: pd.DataFrame) -> bool:
-    s_lower = sheet_name.lower()
-    if any(k in s_lower for k in AUX_SHEET_KEYWORDS):
-        return True
-    if len(df.columns) <= 3 and len(df) <= 30:
-        return True
-    return False
-
-
 def load_and_sync_to_db(
-    uploaded_file, selected_sheet: str = "AUTO_MAIN"
+    uploaded_file, selected_sheet: str = "ALL"
 ) -> tuple[pd.DataFrame, list[str], dict[str, int], dict[str, pd.DataFrame]]:
+    """
+    CSV, Excel(.xlsx), Word(.docx), TXT 파일을 읽고 SQLite DB에 동기화합니다.
+    항상 4개의 값 (df, sheet_names, sheet_counts, aux_sheets)을 일관되게 반환합니다.
+    """
     uploaded_file.seek(0)
     file_bytes = uploaded_file.read()
-    fname_lower = uploaded_file.name.lower()
+    fname = uploaded_file.name.lower()
 
-    sheet_names = ["단일시트(CSV)"]
-    sheet_counts = {}
     aux_sheets: dict[str, pd.DataFrame] = {}
 
-    if fname_lower.endswith(".csv"):
+    if fname.endswith(".csv") or fname.endswith(".txt"):
         try:
             df = pd.read_csv(io.BytesIO(file_bytes), encoding="utf-8")
         except UnicodeDecodeError:
             df = pd.read_csv(io.BytesIO(file_bytes), encoding="cp949")
-        for col in df.select_dtypes(include=["object"]).columns:
-            df[col] = df[col].fillna("-").astype(str).apply(clean_polarion_xml_text).replace({"None": "-", "nan": "-", "": "-"})
-        sheet_counts["단일시트(CSV)"] = len(df)
+        except Exception:
+            text_lines = file_bytes.decode("utf-8", errors="replace").splitlines()
+            df = pd.DataFrame([{"행번호": i + 1, "내용": line.strip()} for i, line in enumerate(text_lines) if line.strip()])
 
-    elif fname_lower.endswith(".docx"):
-        df, sheet_names, sheet_counts, aux_sheets = _parse_docx_bytes(file_bytes, selected_sheet=selected_sheet)
+        for col in df.columns:
+            if not pd.api.types.is_numeric_dtype(df[col]):
+                df[col] = pd.Series([_safe_str(v) for v in df[col]], index=df.index, dtype=object)
+        sheet_names = ["단일시트"]
+        sheet_counts = {"단일시트": len(df)}
 
-    elif fname_lower.endswith((".txt", ".md")):
-        df, sheet_names, sheet_counts, aux_sheets = _parse_text_bytes(file_bytes, uploaded_file.name)
+    elif fname.endswith(".docx"):
+        df, sheet_names, sheet_counts, aux_sheets = _read_docx_file(file_bytes)
+        if selected_sheet in aux_sheets:
+            df = aux_sheets[selected_sheet]
 
     else:
         wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
         sheet_names = wb.sheetnames
-        all_sheet_dfs: dict[str, pd.DataFrame] = {}
+        sheet_counts = {}
         main_dfs = []
+        all_sheet_dfs = {}
 
         for s_name in sheet_names:
             s_df = _read_excel_sheet_with_colors(wb, s_name)
             sheet_counts[s_name] = len(s_df)
             if len(s_df) > 0:
                 all_sheet_dfs[s_name] = s_df
+                if _is_aux_sheet(s_name, s_df):
+                    aux_sheets[s_name] = s_df
+                else:
+                    s_copy = s_df.copy()
+                    s_copy.insert(0, "시트명", s_name)
+                    main_dfs.append(s_copy)
 
-        for s_name, s_df in all_sheet_dfs.items():
-            if _is_aux_sheet(s_name, s_df) and len(all_sheet_dfs) > 1:
-                aux_sheets[s_name] = s_df
-            else:
-                df_copy = s_df.copy()
-                if len(all_sheet_dfs) > 1:
-                    df_copy.insert(0, "시트명", s_name)
-                main_dfs.append(df_copy)
-
+        # 만약 모든 시트가 보조 시트로 분류되었다면 전체를 메인 시트로 사용
         if not main_dfs and all_sheet_dfs:
-            first_s = next(iter(all_sheet_dfs.keys()))
-            df_copy = all_sheet_dfs[first_s].copy()
-            df_copy.insert(0, "시트명", first_s)
-            main_dfs.append(df_copy)
-            aux_sheets.pop(first_s, None)
-
-        if selected_sheet == "AUTO_MAIN":
-            df = pd.concat(main_dfs, ignore_index=True) if main_dfs else pd.DataFrame()
-        elif selected_sheet == "ALL_MERGE":
-            merged = []
             for s_name, s_df in all_sheet_dfs.items():
-                c_df = s_df.copy()
-                c_df.insert(0, "시트명", s_name)
-                merged.append(c_df)
-            df = pd.concat(merged, ignore_index=True) if merged else pd.DataFrame()
-        elif selected_sheet in all_sheet_dfs:
-            df = all_sheet_dfs[selected_sheet].copy()
-            df.insert(0, "시트명", selected_sheet)
-        else:
-            df = pd.concat(main_dfs, ignore_index=True) if main_dfs else pd.DataFrame()
+                s_copy = s_df.copy()
+                s_copy.insert(0, "시트명", s_name)
+                main_dfs.append(s_copy)
+            aux_sheets = {}
 
-        for col in df.select_dtypes(include=["object"]).columns:
-            df[col] = df[col].fillna("-").astype(str).replace({"None": "-", "nan": "-"})
+        if selected_sheet == "ALL" or selected_sheet not in all_sheet_dfs:
+            df = pd.concat(main_dfs, ignore_index=True) if main_dfs else pd.DataFrame()
+        else:
+            df = all_sheet_dfs[selected_sheet].copy()
+            if "시트명" not in df.columns:
+                df.insert(0, "시트명", selected_sheet)
+
+        for col in df.columns:
+            if not pd.api.types.is_numeric_dtype(df[col]):
+                df[col] = pd.Series([_safe_str(v) for v in df[col]], index=df.index, dtype=object)
 
     if len(df) > 0:
         with sqlite3.connect(DB_PATH) as conn:
@@ -397,8 +313,10 @@ def load_and_sync_to_db(
 
 
 def filter_by_keywords(df: pd.DataFrame, keyword_str: str, match_all: bool = False) -> pd.DataFrame:
-    if not keyword_str or not keyword_str.strip():
+    """쉼표(,)로 구분된 키워드 조합(OR / AND)으로 데이터프레임을 필터링합니다."""
+    if not keyword_str or not keyword_str.strip() or len(df) == 0:
         return df
+
     keywords = [k.strip() for k in keyword_str.split(",") if k.strip()]
     if not keywords:
         return df
@@ -407,42 +325,45 @@ def filter_by_keywords(df: pd.DataFrame, keyword_str: str, match_all: bool = Fal
     if match_all:
         mask = pd.Series(True, index=df.index)
         for kw in keywords:
-            mask &= row_text.str.contains(kw, case=False, na=False)
+            mask &= row_text.str.contains(re.escape(kw), case=False, na=False)
     else:
-        pattern = "|".join(keywords)
+        pattern = "|".join(re.escape(k) for k in keywords)
         mask = row_text.str.contains(pattern, case=False, na=False)
+
     return df[mask]
 
 
 def run_sql_query(sql_query: str) -> pd.DataFrame:
+    """자동 생성된 SQLite DB에 직접 SQL 쿼리를 실행하고 결측치를 안전하게 '-'로 정제하여 반환합니다."""
     with sqlite3.connect(DB_PATH) as conn:
         res_df = pd.read_sql_query(sql_query, conn)
-    for col in res_df.select_dtypes(include=["object"]).columns:
-        res_df[col] = res_df[col].fillna("-").astype(str).replace({"None": "-", "nan": "-"})
+    for col in res_df.columns:
+        if not pd.api.types.is_numeric_dtype(res_df[col]):
+            res_df[col] = pd.Series([_safe_str(v) for v in res_df[col]], index=res_df.index, dtype=object)
     return res_df
 
 
 def export_db_to_sql_script(current_sql: str = "") -> bytes:
+    """Notepad++ 등에서 바로 열어볼 수 있는 UTF-8 SQL 덤프 파일을 생성합니다."""
     lines = [
         "-- ============================================================================",
         "-- [사내 데이터 분석 AI Agent] SQLite 데이터베이스 전체 덤프 (.sql)",
         f"-- 생성 일시: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         f"-- 대상 테이블명: {TABLE_NAME}",
-        "-- * 이 파일은 Notepad++, DBeaver, VS Code 등에서 UTF-8로 바로 열람·실행 가능합니다.",
         "-- ============================================================================",
         "",
     ]
+
     if current_sql and current_sql.strip():
         lines.extend([
             "-- [1] 현재 대시보드에서 실행 중인 조회 SQL 쿼리",
             current_sql.strip(),
             "",
-            "-- ============================================================================",
-            "-- [2] 테이블 스키마(CREATE TABLE) 및 전체 데이터(INSERT INTO) 덤프",
-            "-- ============================================================================",
         ])
+
     if DB_PATH.exists():
         with sqlite3.connect(DB_PATH) as conn:
             for dump_line in conn.iterdump():
                 lines.append(dump_line)
+
     return "\n".join(lines).encode("utf-8-sig")
