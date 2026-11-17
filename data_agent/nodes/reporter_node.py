@@ -1,203 +1,276 @@
-import json
+# data_agent/nodes/reporter_node.py
 import re
-from typing import Any
-from data_agent.llm import call_llm
+import pandas as pd
+from data_agent.llm import invoke_llm
 
 
-def _detect_data_domain(data_summary: str) -> str:
-    """
-    업로드된 데이터의 실제 컬럼과 집계 내용을 분석하여 도메인 성격을 판별합니다:
-    - 'manufacturing': 생산량·불량수 중심 제조 공정 데이터
-    - 'tc_procedure_spec': 실행 결과(Pass/Fail)나 색상 강조 없이 Sub System, Domain, Automated, Procedure 등으로 구성된 TC 절차서/명세서
-    - 'tc_execution_result': 실제 Pass/Fail 실행 결과나 색상 강조가 포함된 검증 결과 시트
-    - 'general_doc': 워드(.docx) 문단이나 일반 업무 문서
-    """
-    s_lower = data_summary.lower()
-    if "생산량" in s_lower and "불량수" in s_lower:
+def _detect_dataset_type(df: pd.DataFrame, summary_text: str = "") -> str:
+    """데이터프레임 컬럼과 요약문을 기반으로 데이터 유형(tc / manufacturing / general) 판별"""
+    cols_str = " ".join([str(c).lower() for c in df.columns]) if df is not None and not df.empty else ""
+    combined = f"{cols_str} {summary_text.lower()}"
+
+    tc_keywords = ["procedure", "pass/fail", "criteria", "actual result", "precondition", "tc", "test", "domain", "rtc"]
+    mfg_keywords = ["생산량", "불량수", "불량률", "생산라인", "설비가동률", "교대"]
+
+    if any(k in combined for k in tc_keywords):
+        return "tc"
+    if any(k in combined for k in mfg_keywords):
         return "manufacturing"
-    if "문단id" in s_lower or "문서 섹션(목차)" in s_lower:
-        return "general_doc"
-    if any(k in s_lower for k in ["sub system", "automated", "pass/fail criteria", "pre-condition", "precondition", "procedure", "test type"]):
-        has_color_table = "셀 배경색(강조 표시) 위치 및 문맥별 실제 의미 분석" in data_summary
-        has_exec_status = "실행 및 판정 상태(pass / fail / not run) 정밀 집계" in s_lower
-        if has_color_table or has_exec_status:
-            return "tc_execution_result"
-        return "tc_procedure_spec"
-    return "general_doc"
+    return "general"
 
 
-def _convert_json_if_needed(raw_text: str) -> str:
-    """만약 LLM이 마크다운 대신 JSON으로 응답했을 경우 4단락 마크다운 보고서로 자동 변환합니다."""
-    stripped = raw_text.strip()
-    model_header = ""
-    if stripped.startswith("*(연결 모델:") or stripped.startswith("*(로컬 모델:"):
-        first_nl = stripped.find("\n")
-        if first_nl != -1:
-            model_header = stripped[:first_nl].strip() + "\n\n"
-            stripped = stripped[first_nl:].strip()
-
-    if stripped.startswith("{") and stripped.endswith("}"):
-        try:
-            data = json.loads(stripped)
-            summary = data.get("summary", "데이터 핵심 요약 분석 완료")
-            anomalies = data.get("anomalies", [])
-            trends = data.get("trends", [])
-            causes = data.get("causes", data.get("hypotheses", []))
-            actions = data.get("actions", data.get("recommendations", []))
-
-            md_parts = [
-                model_header + "### 1. Executive Snapshot (전체 핵심 지표 요약 및 종합 현황)",
-                f"- {summary}",
-            ]
-            for t in trends:
-                md_parts.append(f"- {t}")
-
-            md_parts.append("\n### 2. 도메인 / 서브시스템 & 주요 주제별 심층 분포")
-            for a in anomalies:
-                md_parts.append(f"- {a}")
-
-            md_parts.append("\n### 3. 기술적 리스크 및 원인 가설 (데이터 근거 기반 추론)")
-            if causes:
-                for c in causes:
-                    md_parts.append(f"- {c}")
-            else:
-                md_parts.append("- 집계된 상위 도메인·서브시스템 및 수동(Manual) 테스트 비중을 고려할 때 인터페이스 경계 조건에서 리스크가 발생할 가능성이 있습니다.")
-
-            md_parts.append("\n### 4. 실무 조치 제안 (시점별 로드맵 및 부서별 R&R)")
-            if actions:
-                for act in actions:
-                    md_parts.append(f"- {act}")
-            else:
-                md_parts.append("- **즉시 조치 (24시간 내):**\n  - **[담당 검증/QA팀]** 핵심 서브시스템 및 수동(Manual) 검증 항목의 우선순위 점검")
-                md_parts.append("- **근본 대책 (1개월 내):**\n  - **[개발/자동화팀]** 반복 기능 테스트의 자동화(Auto) 전환 및 표준 검증 절차 고도화")
-
-            return "\n".join(md_parts)
-        except Exception:
-            pass
-    return raw_text
-
-
-def _fix_collapsed_markdown_tables(text: str) -> str:
-    """마크다운 표가 줄바꿈 없이 한 줄로 이어붙었을 때 줄바꿈을 자동 복원합니다."""
-    fixed = re.sub(r"\|\s*\|\s*(?=(?::?-+:?|\d+\s*\||TC-|REQ-|Auto_|•|[A-Za-z가-힣]))", "|\n| ", text)
-    fixed = re.sub(r"([.다요음함)])\s*(\|\s*(?:순위|항목|구분|분류|테스트)\s*\|)", r"\1\n\n\2", fixed)
-    return fixed
-
-
-def _clean_empty_bullets(text: str) -> str:
-    cleaned_lines = []
-    for line in text.splitlines():
-        stripped = line.strip()
-        if re.match(r"^[-*•▪▶\s]+$", stripped) and stripped != "":
-            continue
-        cleaned_lines.append(line.rstrip())
-    return "\n".join(cleaned_lines).strip()
-
-
-def reporter_node(state: dict[str, Any]) -> dict[str, Any]:
+def _build_tc_structured_context(df: pd.DataFrame) -> str:
     """
-    데이터의 실제 성격(생산 공정 vs TC 절차서 명세 vs TC 실행 결과 vs 일반 문서)과
-    실제 존재하는 컬럼만을 반영하여 Groq 스타일의 Executive Snapshot 보고서를 생성합니다.
-    (데이터에 없는 색상 강조, 중요도 High, 가짜 PASS/FAIL, 없는 Summary 시트 언급을 원천 차단!)
+    TC 절차 엑셀 데이터를 파이썬 규칙 기반으로 사전 집계합니다.
+    - Auto_RTC 등 ID 접두사를 자동화(Automated)로 오판하지 않도록 실제 컬럼 기반으로만 집계
+    - 건수와 비중을 'N건 (XX.X%)' 형식으로 분리하여 525% 같은 숫자 붙음 방지
+    - 그룹별 실제 대표 TC를 중복 없이 추출
     """
-    mode = state.get("mode", "mock")
-    data_summary = state.get("data_summary", "")
-    question = state.get("question", "핵심 지표 현황과 분류별 비중, 리스크 가설 및 부서별 실행 계획을 정리해 줘.")
+    if df is None or df.empty:
+        return "조회된 TC 데이터가 없습니다."
 
-    domain_type = _detect_data_domain(data_summary)
-    has_color_cells = "셀 배경색(강조 표시) 위치 및 문맥별 실제 의미 분석" in data_summary
-    has_aux_sheets = "[보조 시트/내장표 목록]: 없음" not in data_summary
+    total_cnt = len(df)
+    lines = [f"[파이썬 정밀 집계 요약 — 총 {total_cnt}건]"]
 
-    if domain_type == "manufacturing":
-        matches = re.findall(r"평균 불량률\(%\)\s*\|\s*(\d+\.\d+)%|불량률\(%\)\s*(\d+\.\d+)%", data_summary)
-        rates = [float(m[0] or m[1]) for m in matches if (m[0] or m[1])]
-        worst_rate = max(rates) if rates else 0.0
-        if worst_rate > 1.5:
-            status_banner = f"> 🚨 **[확인 필요] 불량률이 사내 기준(1.5%)을 초과한 라인(최고 `{worst_rate:.2f}%`)이 있습니다. 주간회의 안건으로 올리세요.**\n\n"
-        else:
-            status_banner = "> ✅ **[이상 없음] 모든 라인의 불량률이 사내 기준(1.5%) 이내입니다. 정기 보고로만 처리하세요.**\n\n"
-    elif domain_type == "tc_procedure_spec":
-        status_banner = (
-            "> 📋 **[TC 검증 절차서/명세 분석 완료] 본 파일은 테스트 실행 전 단계인 표준 검증 절차서(Specification)입니다. "
-            "도메인·서브시스템 분포, 자동화(Auto/Manual) 현황 및 중점 관리 시나리오를 중심으로 보고합니다.**\n\n"
-        )
-    elif domain_type == "tc_execution_result":
-        has_real_fail = bool(re.search(r"실행 실패|불합격\(FAIL\)|\bFAIL\b", data_summary))
-        if has_real_fail:
-            status_banner = "> 🚨 **[확인 필요] 테스트 실행 결과 불합격(FAIL) 또는 주의 항목이 감지되었습니다. 원인 분석 및 재검증이 필요합니다.**\n\n"
-        else:
-            status_banner = "> 📌 **[점검 안내] 테스트케이스 상태 및 강조 표시 항목에 대한 문맥 분석 결과입니다.**\n\n"
+    # 컬럼 매핑 탐색
+    col_map = {str(c).strip().lower(): c for c in df.columns}
+    domain_col = next((col_map[k] for k in col_map if "domain" in k or "도메인" in k or "영역" in k), None)
+    app_col = next((col_map[k] for k in col_map if k in ["app", "module", "subsystem", "앱", "모듈", "서브시스템"] or "app" in k), None)
+    id_col = next((col_map[k] for k in col_map if k in ["id", "tc id", "tc_id", "test id"] or "id" in k), None)
+    title_col = next((col_map[k] for k in col_map if "title" in k or "제목" in k or "시나리오" in k or "name" in k), None)
+    actual_col = next((col_map[k] for k in col_map if "actual" in k or "결과" in k or "판정" in k or "result" in k), None)
+    auto_col = next((col_map[k] for k in col_map if k in ["automation", "auto/manual", "execution type", "자동화여부", "수행방식"]), None)
+
+    def _get_rep_items(sub_df: pd.DataFrame, max_items: int = 3) -> str:
+        reps = []
+        for _, row in sub_df.head(max_items).iterrows():
+            tid = str(row[id_col]).strip() if id_col and pd.notna(row[id_col]) else ""
+            ttitle = str(row[title_col]).strip() if title_col and pd.notna(row[title_col]) else ""
+            item_str = f"{tid} {ttitle}".strip()
+            if item_str and item_str != "-":
+                reps.append(item_str[:70])
+        return " / ".join(reps) if reps else "대표 항목 없음"
+
+    # 1) 도메인별 집계
+    if domain_col:
+        lines.append("\n1. 도메인(Domain)별 분포:")
+        vc = df[domain_col].fillna("미분류").astype(str).str.strip().value_counts()
+        for val, cnt in vc.head(6).items():
+            pct = (cnt / total_cnt) * 100
+            sub = df[df[domain_col].fillna("미분류").astype(str).str.strip() == val]
+            lines.append(f"  - {val}: {cnt}건 ({pct:.1f}%) | 대표 TC: {_get_rep_items(sub, 3)}")
+
+    # 2) 서브시스템 / App별 집계
+    if app_col and app_col != domain_col:
+        lines.append("\n2. 서브시스템(App/Module)별 분포:")
+        vc = df[app_col].fillna("미분류").astype(str).str.strip().value_counts()
+        for val, cnt in vc.head(6).items():
+            pct = (cnt / total_cnt) * 100
+            sub = df[df[app_col].fillna("미분류").astype(str).str.strip() == val]
+            lines.append(f"  - {val}: {cnt}건 ({pct:.1f}%) | 대표 TC: {_get_rep_items(sub, 3)}")
+
+    # 3) 기능 시나리오 유형별 분류 (Title/Procedure 키워드 기반)
+    text_Series = pd.Series([""] * total_cnt, index=df.index)
+    for c in [title_col, id_col]:
+        if c:
+            text_Series = text_Series + " " + df[c].fillna("").astype(str)
+
+    scenario_buckets = {
+        "Video Encode (VP9/VP8/H.264/H.265 등 인코딩)": text_Series.str.contains("encode", case=False, na=False),
+        "Video Decode (디코딩 및 재생)": text_Series.str.contains("decode", case=False, na=False),
+        "Multi-Instance / 동시성 및 스트레스": text_Series.str.contains("multiple|multi|concurrent|stress", case=False, na=False),
+    }
+    matched_any = pd.Series([False] * total_cnt, index=df.index)
+    lines.append("\n3. 주요 기능 시나리오 유형별 분포:")
+    for label, mask in scenario_buckets.items():
+        cnt = int(mask.sum())
+        if cnt > 0:
+            matched_any = matched_any | mask
+            pct = (cnt / total_cnt) * 100
+            lines.append(f"  - {label}: {cnt}건 ({pct:.1f}%) | 대표 TC: {_get_rep_items(df[mask], 2)}")
+    other_cnt = int((~matched_any).sum())
+    if other_cnt > 0:
+        pct = (other_cnt / total_cnt) * 100
+        lines.append(f"  - 기타 일반 기능/인터페이스 검증: {other_cnt}건 ({pct:.1f}%) | 대표 TC: {_get_rep_items(df[~matched_any], 2)}")
+
+    # 4) Actual Result / 판정 및 수행 현황
+    if actual_col:
+        s_act = df[actual_col].fillna("-").astype(str).str.strip()
+        fail_mask = s_act.str.contains("빨강|불합격|fail|ng|주의|error", case=False, na=False)
+        pass_mask = s_act.str.contains("초록|정상|pass|ok", case=False, na=False) & (~fail_mask)
+        warn_mask = s_act.str.contains("노랑|확인필요|hold|pending|inconc", case=False, na=False)
+        empty_mask = s_act.isin(["-", "", "None", "nan", "N/A"]) | (~(fail_mask | pass_mask | warn_mask))
+
+        f_cnt, p_cnt, w_cnt, e_cnt = int(fail_mask.sum()), int(pass_mask.sum()), int(warn_mask.sum()), int(empty_mask.sum())
+        lines.append("\n4. Actual Result(실제 판정 및 배경색) 현황:")
+        lines.append(f"  - 정상(PASS/초록): {p_cnt}건 ({(p_cnt/total_cnt)*100:.1f}%)")
+        lines.append(f"  - 불합격/주의(FAIL/빨강 배경): {f_cnt}건 ({(f_cnt/total_cnt)*100:.1f}%)")
+        lines.append(f"  - 확인필요/보류(노랑 배경): {w_cnt}건 ({(w_cnt/total_cnt)*100:.1f}%)")
+        lines.append(f"  - 미수행/결과 미기입(공란): {e_cnt}건 ({(e_cnt/total_cnt)*100:.1f}%)")
+        if f_cnt > 0:
+            lines.append(f"  - [주의/불합격 대표 항목]: {_get_rep_items(df[fail_mask], 3)}")
+
+    # 5) 수행 방식(수동 절차 vs 자동화) 안내
+    if auto_col:
+        lines.append("\n5. 수행 방식(자동/수동) 분포:")
+        vc = df[auto_col].fillna("미지정").astype(str).value_counts()
+        for val, cnt in vc.items():
+            lines.append(f"  - {val}: {cnt}건 ({(cnt/total_cnt)*100:.1f}%)")
     else:
-        status_banner = "> 📊 **[문서·데이터 종합 분석 완료] 업로드된 데이터의 핵심 분류와 주요 내용을 기반으로 작성된 보고서입니다.**\n\n"
-
-    # 데이터에 없는 내용을 절대 지어내지 못하도록 동적 금지 규칙 생성
-    strict_negative_rules = [
-        "1. **[절대 환각 금지]** 아래 [1. 분석 대상 정밀 집계표]에 실제로 적혀 있는 숫자와 건수, 비율(%), 컬럼명, ID만 사용하세요. 표에 없는 숫자를 절대 임의로 지어내지 마세요."
-    ]
-    if not has_color_cells:
-        strict_negative_rules.append(
-            "2. **[색상/중요도 날조 절대 금지]** 현재 데이터에는 배경색 강조 셀이나 중요도(High) 표시가 **전혀 없습니다(0건)**. 보고서에 '색상 강조', '빨간색 배경', '중요도(High)'라는 단어를 **단 한 번도 쓰지 마세요**."
-        )
-    if domain_type == "tc_procedure_spec":
-        strict_negative_rules.append(
-            "3. **[가짜 PASS/FAIL 판정 날조 절대 금지]** 현재 파일은 테스트 실행 전 '절차서'이므로 실제 성공(PASS)이나 실패(FAIL) 결과가 없습니다. 특정 TC가 PASS 또는 FAIL 했다거나 '실패 원인은 Checksum...' 같은 가짜 실행 결과를 절대 꾸며내지 마세요. 반드시 실제 존재하는 `Domain`, `Sub System`, `Test Type`, `Automated(Auto/Manual)`, `Title 주제 분류`만 분석하세요."
-        )
-    if not has_aux_sheets:
-        strict_negative_rules.append(
-            "4. **[없는 보조 시트 언급 금지]** 현재 파일에는 `Summary`나 `Environment` 보조 시트가 없습니다. 존재하지 않는 보조 시트 이야기를 절대 쓰지 마세요."
+        lines.append(
+            "\n5. 테스트 수행 성격(중요 가이드):\n"
+            "  - 본 문서는 Precondition, Procedure(수행 절차), Pass/Fail Criteria, Actual Result로 구성된 'TC 검증 절차 레포트'입니다.\n"
+            "  - TC ID에 포함된 'Auto_RTC'의 'Auto'는 차량용(Automotive) 프로젝트/식별자 접두사일 뿐 자동화 스크립트 여부를 뜻하지 않습니다.\n"
+            "  - 별도의 자동화 전용 컬럼이 없으므로 절대 '수동 테스트가 0건(0%)이다'라고 단정하지 말고, "
+            "'표준 절차(Procedure) 기반 기능 검증 및 결과 기록 시트' 관점에서 분석하십시오."
         )
 
-    negative_rules_str = "\n".join(strict_negative_rules)
+    return "\n".join(lines)
 
-    prompt = f"""당신은 수석 데이터 분석 및 QA·품질 전략 전문가입니다.
-아래 [파이썬 정밀 집계표 및 실제 데이터]만을 근거로, 경영진과 팀장이 한눈에 의사결정할 수 있는 **Executive Snapshot 스타일의 보고서**를 한국어로 작성하세요.
+
+def _sanitize_report_format(text: str) -> str:
+    """
+    LLM 출력 후처리:
+    1) <br>, <br/> 태그가 화면에 노출되지 않도록 제거/공백 치환
+    2) 건수와 비중이 '525%', '00%'처럼 붙어버린 패턴 및 마크다운 표 깨짐 교정
+    3) '수동 테스트는 없습니다' 오판 문구 자동 교정
+    """
+    if not text:
+        return ""
+
+    # 1. 노출된 HTML 줄바꿈 태그 정리
+    cleaned = re.sub(r"<br\s*/?>\s*-\s*", ", ", text, flags=re.IGNORECASE)
+    cleaned = re.sub(r"<br\s*/?>", " / ", cleaned, flags=re.IGNORECASE)
+
+    # 2. 깨진 표 머리글이 한 줄로 붙은 현상 제거
+    cleaned = re.sub(
+        r"-\s*구분\s*/\s*관리\s*영역\s*건수\s*및\s*비중\(%\).*?핵심\s*관리\s*포인트\s*",
+        "- ",
+        cleaned,
+    )
+
+    # 3. 'MULTIMEDIA525%' 또는 'Manual00%'처럼 영문/한글 뒤에 건수+비중이 붙은 패턴 교정
+    # 예: MULTIMEDIA525% -> MULTIMEDIA : 5건 (25%)
+    cleaned = re.sub(r"([A-Za-z가-힣]+)(\d+)\s*(100|\d{1,2})%", r"\1: \2건 (\3%) - ", cleaned)
+
+    # 4. '수동 테스트는 없습니다' 오판 문구 교정
+    cleaned = re.sub(
+        r"-\s*Manual\s*:?\s*0건?\s*\(?0%?\)?.*?수동\s*테스트는\s*없습니다\.?",
+        "- 수행 방식 특성: 본 시트는 상세 수행 절차(Procedure)와 판정 기준(Pass/Fail Criteria)이 정의된 절차 기반 TC 레포트이며, ID의 'Auto_RTC'는 프로젝트 식별자입니다.",
+        cleaned,
+    )
+    cleaned = cleaned.replace(
+        "수동 테스트는 없습니다.",
+        "본 데이터는 Procedure(수행 절차) 및 판정 기준이 명시된 절차 기반 검증 시트입니다.",
+    )
+
+    # 5. 빈 불릿(•, -) 정리
+    lines = []
+    for line in cleaned.splitlines():
+        stripped = line.strip()
+        if stripped in ["•", "-", "*", "▶", "• ▶"]:
+            continue
+        lines.append(line)
+
+    return "\n".join(lines).strip()
+
+
+def _ensure_complete_report(report_text: str, dataset_type: str = "tc") -> str:
+    """끊김 감지 및 4번 실무 조치 제안 완결성 보장 안전장치"""
+    cleaned = _sanitize_report_format(report_text)
+    if not cleaned:
+        return "⚠️ 리포트 생성 결과가 비어 있습니다."
+
+    # 마지막 줄이 중간에 잘렸는지 확인 후 보정
+    if not cleaned.endswith((".", "다", "요", "함", "음", ")", "]")):
+        last_newline = cleaned.rfind("\n")
+        if last_newline > 0 and len(cleaned) - last_newline < 45:
+            cleaned = cleaned[:last_newline].strip()
+
+    if "4." not in cleaned and "조치 제안" not in cleaned:
+        if dataset_type == "tc":
+            cleaned += (
+                "\n\n4. 실무 조치 제안 (시점별 로드맵 및 R&R)\n"
+                "- [즉시 조치 (24시간 내 / QA·검증팀)]: Actual Result 미기입 항목 및 주의(빨강/노랑 배경) 표시된 TC의 재수행 로그를 확보하고 판정 사유를 기입하십시오.\n"
+                "- [단기 대책 (1주 내 / 코덱·드라이버 개발팀)]: 다수 비중을 차지하는 Video Encode/Decode(VP9, VP8, H.264, H.265) 및 Multi-Instance 시나리오의 경계값·예외 스트림 테스트를 보강하십시오.\n"
+                "- [중장기 대책 (1개월 내 / 품질관리 파트)]: 엑셀 내 수동/자동 수행 구분(Execution Type) 컬럼을 표준화하여 자동화 커버리지와 수동 절차 검증 범위를 명확히 분리 관리하십시오."
+            )
+        else:
+            cleaned += (
+                "\n\n4. 실무 조치 제안 (시점별 로드맵 및 R&R)\n"
+                "- [즉시 조치 (24시간 내 / 현장관리자)]: 이상치 발생 구간의 설비 파라미터 및 작업 이력을 즉시 점검하십시오.\n"
+                "- [근본 대책 (1개월 내 / 품질·기술팀)]: 반복 불량 유형에 대한 표준 작업서(SOP) 개정 및 예방 점검 주기를 단축하십시오."
+            )
+    return cleaned
+
+
+def reporter_node(state: dict) -> dict:
+    """LangGraph 리포터 노드: 데이터 유형 맞춤형 프롬프트 생성 및 LLM 호출"""
+    df = state.get("df")
+    summary = state.get("summary", "")
+    question = state.get("question", "현재 데이터의 핵심 분포와 이상 징후, 실무 조치 제안을 정리해 줘.")
+    model_mode = state.get("model_mode", "local_ollama")
+
+    dataset_type = _detect_dataset_type(df, summary)
+    is_fast = "fast" in str(model_mode).lower()
+
+    if dataset_type == "tc":
+        tc_context = _build_tc_structured_context(df) if df is not None else summary
+        prompt = f"""당신은 수석 QA/검증 데이터 분석 전문가입니다.
+아래 [파이썬 정밀 집계 요약]의 수치만 그대로 사용하여 사용자의 질문에 대한 분석 리포트를 작성하십시오.
+
+[중요 규칙]
+1. 파이썬이 계산한 건수와 비중 형식(예: '5건 (25.0%)')을 그대로 표기하고, 절대 숫자를 붙여 쓰지 마십시오(예: 525% 금지).
+2. 마크다운 표(|)나 <br> 태그를 절대 사용하지 말고, 깔끔한 불릿 리스트(- ) 형식으로 작성하십시오.
+3. TC ID의 'Auto_RTC'는 차량용(Automotive) 식별자일 뿐이므로, 절대 "수동 테스트가 없다(Manual 0%)"고 쓰지 마십시오.
+4. 각 항목의 대표 TC는 파이썬 집계에 나온 서로 다른 ID·Title을 인용하고 똑같은 목록을 반복 복사하지 마십시오.
+
+[파이썬 정밀 집계 요약]
+{tc_context}
+
+[추가 기초 요약]
+{summary}
+
+[사용자 분석 질문]
+{question}
+
+[필수 출력 목차 (아래 4개 번호와 제목을 정확히 유지)]
+1. 전체 검증 데이터 요약 및 수행·판정 현황
+- 전체 조회 건수, 주요 검증 대상(도메인/모듈), Actual Result 판정 분포(정상/불합격·빨강배경/미기입)를 수치를 포함해 2~3줄로 요약하십시오.
+
+2. 도메인 / 서브시스템 & 주요 기능 시나리오별 심층 분포 분석
+- 도메인별 분포: [영역명] — [건수 (비중%)] | 대표 항목: [ID·Title] | 핵심 검증 포인트
+- 서브시스템(App/Module)별 분포: [모듈명] — [건수 (비중%)] | 대표 항목: [ID·Title] | 핵심 검증 포인트
+- 기능 시나리오 유형별 분포: 인코딩(VP9/VP8/H.265/H.264), 디코딩, 다중 인스턴스(Multiple Instances) 등 실제 시나리오별 건수(비중%)와 대표 ID·Title 정리
+- 검증 집중도 및 절차서 구성의 실무적 의미: 특정 코덱/드라이버(MFC DD 등) 집중도와 절차(Procedure) 기반 검증 시트로서의 관리 포인트 설명
+
+3. 품질 리스크 및 취약 구간 진단 (검증 커버리지·판정 결과 관점)
+- 결과 판정 리스크: Actual Result 내 불합격/주의(빨강·노랑 배경셀) 항목 또는 결과 미기입(공란) 항목에 대한 점검 포인트
+- 시나리오 편중 및 예외 검증 관점: 정상 기능(Functionality) 위주 테스트 외에 예외/스트레스/경계값 테스트 보완 필요성
+- 테스트 자산 관리 관점: 수동 절차 수행과 자동화 스크립트 대상 구분을 위한 메타데이터(실행 방식 열 등) 관리 제안
+
+4. 실무 조치 제안 (시점별 로드맵 및 R&R)
+- 즉시 조치 (24시간 내 / 검증·QA 엔지니어): 주의/불합격 셀 및 미기입 TC 확인 조치
+- 근본 대책 (1개월 내 / 개발·품질 파트): 코덱/서브시스템 커버리지 확장 및 TC 템플릿 표준화 방안
+"""
+    else:
+        style_guide = "각 항목을 1~2문장 핵심 수치 개조식으로 간결히 작성하십시오." if is_fast else "구체적 수치와 근거를 들어 상세히 작성하십시오."
+        prompt = f"""당신은 사내 데이터 분석 AI 에이전트입니다.
+아래 집계 수치만 사용하여 {style_guide} 마크다운 표(|)나 <br> 태그 없이 불릿(-)으로 작성하십시오.
+
+[데이터 집계 요약]
+{summary}
 
 [사용자 질문]
 {question}
 
-[절대 준수 규칙 (위반 시 보고서 실패 처리)]
-{negative_rules_str}
-- JSON(`{{"summary": ...}}`)으로 출력하지 말고, 반드시 아래 1번~4번 마크다운 제목(`### 1.` ~ `### 4.`)과 마크다운 표 형식을 정확히 지키세요.
+[필수 출력 목차]
+1. 핵심 추세 및 전체 요약
+2. 주요 이상 항목 및 집중 구간 분석 (건수 및 비중% 명시)
+3. 원인 가설 (데이터 성격에 맞는 3~4대 관점 추론)
+4. 실무 조치 제안 (즉시 조치 24h / 근본 대책 1개월 R&R)
+"""
 
-[파이썬 정밀 집계표 및 실제 데이터]
-{data_summary}
-
----
-[보고서 필수 작성 양식 (반드시 아래 4개 섹션과 표 구조를 그대로 작성할 것)]
-
-### 1. Executive Snapshot (전체 핵심 지표 요약표 및 종합 현황)
-- 전체 데이터 건수와 주요 분류 항목별(예: `Domain`, `Sub System`, `Test Type`, `Automated`, `주요 기술 키워드 그룹` 또는 `라인`, `불량유형`, `주차` 등 실제 집계표에 있는 항목) 핵심 건수·비중(%)을 아래 마크다운 표로 일목요연하게 정리하세요.
-| 분류 기준 (항목) | 세부 구분 | 건수 (건) | 비중 (%) | 핵심 요약 및 비고 |
-| :--- | :--- | :---: | :---: | :--- |
-- 표 아래에 전체 데이터의 핵심 구조적 특징을 2~3개 불릿으로 명쾌하게 요약하세요.
-
-### 2. 도메인 / 서브시스템 & 주요 주제별 심층 분포 분석
-- 집계표의 상위 비중 영역(예: `MULTIMEDIA`, `SFI CDD`, `Linux`, `SFI` 등 서브시스템/도메인 분포, `Auto vs Manual` 자동화 현황, `Title` 핵심 기술 키워드 묶음, 또는 공정 라인별 현황)을 교차 분석하여 아래 마크다운 표로 정리하세요.
-| 구분 / 관리 영역 | 건수 및 비중(%) | 주요 시나리오 / 대표 항목 (실제 ID·Title 인용) | 핵심 관리 포인트 |
-| :--- | :---: | :--- | :--- |
-- 표 아래에 주요 영역 집중도 및 자동화율(`Auto` vs `Manual`)이 실무적으로 의미하는 바를 2~3개 불릿으로 설명하세요.
-
-### 3. 자동화 여부 · 테스트 유형별 중점 관리 시나리오 및 리스크 가설
-- 실제 데이터에 나타난 특징(예: `Auto` 자동화 테스트와 `Manual` 수동 테스트의 역할 차이, `Cybersecurity Test` 등 특수 테스트 유형, 하드웨어/인터페이스/부팅/코덱/멀티미디어 등 실제 절차 내용, 또는 특정 라인 불량 집중)을 표나 불릿으로 정리하고, 테스트 수행 시 유의해야 할 기술적 리스크 가설을 3가지 제시하세요. (단정하지 말고 **'~할 가능성이 있습니다'** 또는 **'~에 대한 중점 검증이 필요합니다'** 형태로 실제 데이터의 ID나 키워드를 인용해 서술)
-
-### 4. 실무 조치 제안 (시점별 로드맵 및 부서별 R&R)
-- **즉시 조치 (24시간 내 / 단기 실행):**
-  - **[담당 검증/QA팀]** (데이터 내 수동 `Manual` 항목, 고비중 서브시스템 등 우선순위가 높은 시나리오에 대한 구체적 점검 행동)
-  - **[개발/엔지니어링팀]** (핵심 도메인·인터페이스·사전조건 `Pre-condition` 환경 세팅 및 리스크 예방 행동)
-- **근본 대책 (1개월 내 / 중장기 고도화):**
-  - **[테스트 자동화/기술팀]** (수동 테스트의 자동화 스크립트 전환, 커버리지 확대 또는 공정 표준화 대책)
-- **기대 효과 (목표 KPI):**
-  - **[정량 목표]** (조치 완료 시 달성할 자동화율 목표, 검증 커버리지 또는 품질 안정화 목표 수치 명시)"""
-
-    raw_report, elapsed = call_llm(prompt, mode=mode)
-
-    md_report = _convert_json_if_needed(raw_report)
-    md_report = _fix_collapsed_markdown_tables(md_report)
-    md_report = _clean_empty_bullets(md_report)
-
-    final_report = status_banner + md_report
-
-    return {
-        "report": final_report,
-        "elapsed_time": round(state.get("elapsed_time", 0.0) + elapsed, 2),
-    }
+    raw_report = invoke_llm(prompt, mode=model_mode)
+    final_report = _ensure_complete_report(raw_report, dataset_type=dataset_type)
+    return {"report": final_report}
