@@ -7,6 +7,7 @@ from data_agent.excel_exporter import (
     analyze_color_cell_contexts,
     cluster_text_series_by_topic,
     shorten_long_label,
+    evaluate_threshold_verdict,
 )
 
 
@@ -65,7 +66,7 @@ def validate_uploaded_dataframe(df: pd.DataFrame) -> dict:
     if dup_id_cnt > 0:
         warnings.append(f"식별자([{id_col}]) 중복 {dup_id_cnt}건 감지 → 다중 시트 병합 또는 중복 기재 확인 권장")
     if fill_rate < 85.0:
-        warnings.append(f"전체 셀 작성률 {fill_rate}% (미기입 빈칸 비율 {round(100 - fill_rate, 1)}%) → 미기입 항목 점검 필요")
+        warnings.append(f"전체 셀 작성률 {fill_rate}% (미기입·N/A 비율 {round(100 - fill_rate, 1)}%) → 미기입 항목 점검 필요")
 
     return {
         "status": "ok",
@@ -79,10 +80,16 @@ def validate_uploaded_dataframe(df: pd.DataFrame) -> dict:
     }
 
 
-def render_validation_banner(df: pd.DataFrame):
+def render_validation_banner(df: pd.DataFrame, threshold: float = 1.5):
     val_res = validate_uploaded_dataframe(df)
     if val_res["status"] == "empty":
         return
+
+    verdict_str = evaluate_threshold_verdict(df, threshold=threshold)
+    if "확인 필요" in verdict_str:
+        st.warning(f"**{verdict_str}**")
+    else:
+        st.success(f"**{verdict_str}**")
 
     with st.expander(
         f"🛡️ [W47 양식 자동 검증 완료] 유형: {val_res['domain_type']} | "
@@ -159,8 +166,15 @@ def render_kpi_summary_cards(target_df: pd.DataFrame, threshold: float = DEFAULT
     else:
         cat_col = _pick_best_categorical_col(target_df, ["Sub System", "Category", "Domain", "App", "IP", "Priority", "시트명", "분류"])
         top_cat_str = "-"
-        focus_cnt = 0
-        focus_cut = threshold if threshold >= 5.0 else 20.0
+        exceed_col_cnt = 0
+        total_cnt = len(target_df)
+
+        for c in all_cols:
+            vals = [str(v).strip() for v in target_df[c].tolist()]
+            empty_c = sum(1 for v in vals if v in ("-", "", "None", "nan"))
+            if total_cnt > 0 and (empty_c / total_cnt * 100) > threshold:
+                exceed_col_cnt += 1
+
         if cat_col:
             vc = target_df[cat_col].astype(str).value_counts()
             if not vc.empty:
@@ -168,11 +182,10 @@ def render_kpi_summary_cards(target_df: pd.DataFrame, threshold: float = DEFAULT
                 top_cnt = int(vc.iloc[0])
                 top_pct = round(top_cnt / len(target_df) * 100, 1)
                 top_cat_str = f"{shorten_long_label(top_val, 14)} ({top_cnt}건·{top_pct}%)"
-                focus_cnt = int(((vc / len(target_df) * 100) >= focus_cut).sum())
 
         auto_or_res_col = _pick_best_categorical_col(
             target_df,
-            ["Automated", "Priority", "Test Type", "Execution Status", "PASS/FAIL", "Actual Result", "Result"],
+            ["Priority", "Automated", "Test Type", "Execution Status", "PASS/FAIL", "Actual Result", "Result"],
             exclude=[cat_col] if cat_col else [],
         )
         sub_metric_label = "⚙️ 주요 속성 분포"
@@ -186,15 +199,15 @@ def render_kpi_summary_cards(target_df: pd.DataFrame, threshold: float = DEFAULT
                 sub_metric_label = f"📊 [{auto_or_res_col}] 최다"
                 sub_metric_val = f"{shorten_long_label(v_name, 14)} ({v_pct}%)"
 
-        color_df = analyze_color_cell_contexts(target_df)
         k1.metric("📌 총 조회 데이터 건수", f"{len(target_df):,} 건")
         k2.metric(f"🏆 [{cat_col or '분류'}] 1위 비중", top_cat_str)
         k3.metric(sub_metric_label, sub_metric_val)
-        # 배경색이 있는 엑셀일 때만 색상강조 건수를 보여주고, 0건이면 '중점 관리 영역 수(사내 기준값 연동)'를 표시!
-        if len(color_df) > 0:
-            k4.metric("🎨 셀 색상강조 감지", f"{len(color_df):,} 건")
-        else:
-            k4.metric(f"🎯 중점 모듈 (비중 {focus_cut:.0f}%↑)", f"{focus_cnt} 개 영역")
+        k4.metric(
+            f"🎚️ 미기입률 기준({threshold}%) 초과 열",
+            f"{exceed_col_cnt} 개 컬럼",
+            delta="점검 필요 🚨" if exceed_col_cnt > 0 else "전 컬럼 기준 이내 ✅",
+            delta_color="inverse" if exceed_col_cnt > 0 else "normal",
+        )
 
 
 def render_smart_charts(
@@ -212,7 +225,6 @@ def render_smart_charts(
     num_cols = target_df.select_dtypes(include=["number"]).columns.tolist()
     all_cols = target_df.columns.tolist()
 
-    # CASE A: 제조·생산 수치 데이터
     if is_manufacturing_df(target_df) or (num_cols and len(num_cols) >= 2):
         cat_cols = target_df.select_dtypes(include=["object", "category"]).columns.tolist()
         line_col = "라인" if "라인" in all_cols else ("생산라인" if "생산라인" in all_cols else (cat_cols[0] if cat_cols else all_cols[0]))
@@ -294,7 +306,6 @@ def render_smart_charts(
                 st.plotly_chart(fig4, use_container_width=True, key=f"{key_prefix}_num4")
         return
 
-    # CASE B: TC 검증 시트 / 배민 TC / Polarion TC / 일반 문서
     primary_cat = _pick_best_categorical_col(
         target_df,
         ["Sub System", "Category", "Domain", "App", "IP", "Priority", "시트명", "분류"],
@@ -315,8 +326,7 @@ def render_smart_charts(
         None,
     )
 
-    focus_cut = defect_threshold if defect_threshold >= 5.0 else 20.0
-    cut_count_line = round(len(target_df) * (focus_cut / 100.0), 1)
+    cut_count_line = round(len(target_df) * (defect_threshold / 100.0), 1)
 
     r1_c1, r1_c2 = st.columns(2)
 
@@ -325,7 +335,7 @@ def render_smart_charts(
         vc1.columns = [primary_cat, "건수"]
         vc1["비중(%)"] = (vc1["건수"] / len(target_df) * 100).round(1)
         vc1["표시라벨"] = vc1.apply(
-            lambda r: f"{r['건수']:,}건 ({r['비중(%)']}%) {'🎯중점' if r['비중(%)'] >= focus_cut else ''}".strip(),
+            lambda r: f"{r['건수']:,}건 ({r['비중(%)']}%) {'🎯기준이상' if r['비중(%)'] >= defect_threshold else ''}".strip(),
             axis=1,
         )
         vc1["짧은라벨"] = vc1[primary_cat].apply(lambda x: shorten_long_label(str(x), 24))
@@ -334,11 +344,11 @@ def render_smart_charts(
         fig_c1 = px.bar(
             vc1, x="건수", y="짧은라벨", orientation="h", color="짧은라벨", text="표시라벨",
             color_discrete_sequence=DISTINCT_PALETTE,
-            title=f"① [{primary_cat}] TOP 순위 및 중점 기준({focus_cut:.0f}% = {cut_count_line}건) 비교",
+            title=f"① [{primary_cat}] TOP 분포 및 사내 기준({defect_threshold}% = {cut_count_line}건) 비교",
         )
         fig_c1.add_vline(
             x=cut_count_line, line_dash="dash", line_color="#DC2626",
-            annotation_text=f"중점 관리 기준 ({focus_cut:.0f}%)",
+            annotation_text=f"사내 기준 ({defect_threshold}%)",
         )
         fig_c1.update_traces(textposition="outside", cliponaxis=False)
         fig_c1.update_layout(

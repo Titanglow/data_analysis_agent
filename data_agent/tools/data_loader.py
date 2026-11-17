@@ -14,7 +14,6 @@ TABLE_NAME = "internal_data"
 
 
 def _safe_str(val) -> str:
-    """None, NaN, float 등 어떤 타입이 들어와도 안전하게 문자열로 변환합니다."""
     if val is None:
         return "-"
     try:
@@ -29,7 +28,6 @@ def _safe_str(val) -> str:
 
 
 def _strip_color_tag(val) -> str:
-    """셀 값에서 [🎨...] 또는 [🔴...] 색상 태그만 안전하게 제거합니다 (float 에러 원천 방지)."""
     s = _safe_str(val)
     if s == "-":
         return "-"
@@ -38,12 +36,16 @@ def _strip_color_tag(val) -> str:
 
 
 def _classify_rgb_color(rgb_hex: str) -> str | None:
+    """실제 명시적인 RGB 배경색이 칠해진 경우에만 색상을 판별합니다 (테마 기본색 오탐지 완전 차단)."""
     if not rgb_hex or not isinstance(rgb_hex, str):
         return None
     clean_hex = rgb_hex.strip().upper()
     if clean_hex in ("00000000", "FFFFFFFF", "00FFFFFF", "FF000000", "000000", "FFFFFF"):
         return None
     if len(clean_hex) == 8:
+        # 알파 채널이 00(투명)이면 무시
+        if clean_hex.startswith("00"):
+            return None
         clean_hex = clean_hex[2:]
     if len(clean_hex) != 6:
         return None
@@ -54,20 +56,20 @@ def _classify_rgb_color(rgb_hex: str) -> str | None:
     except ValueError:
         return None
 
-    if r > 240 and g > 240 and b > 240:
+    # 흰색/회색/무채색 계열(R, G, B 차이가 작은 표 기본 배경색)은 모두 무시
+    if r > 235 and g > 235 and b > 235:
         return None
-    if r > 180 and g < 130 and b < 130:
+    if max(r, g, b) - min(r, g, b) < 35:
+        return None
+
+    if r > 190 and g < 120 and b < 120:
         return "🎨빨강강조"
-    if r > 200 and 100 <= g < 185 and b < 110:
+    if r > 210 and 100 <= g < 180 and b < 100:
         return "🎨주황강조"
-    if r > 200 and g >= 185 and b < 150:
+    if r > 210 and g >= 185 and b < 140:
         return "🎨노랑강조"
-    if g > 160 and r < 160 and b < 160:
+    if g > 170 and r < 140 and b < 140:
         return "🎨초록강조"
-    if b > 170 and r < 160 and g < 185:
-        return "🎨파랑강조"
-    if r > 150 and b > 150 and g < 140:
-        return "🎨보라강조"
     return None
 
 
@@ -96,20 +98,17 @@ def _read_excel_sheet_with_colors(wb: openpyxl.Workbook, sheet_name: str) -> pd.
 
             color_tag = None
             fill = getattr(cell, "fill", None)
-            if fill and getattr(fill, "fill_type", None) in ("solid", "mediumGray", "darkGray", "lightGray"):
+            if fill and getattr(fill, "fill_type", None) == "solid":
                 fg = getattr(fill, "start_color", None)
-                if fg:
+                if fg and getattr(fg, "type", None) == "rgb":
                     rgb_val = getattr(fg, "rgb", None)
                     if isinstance(rgb_val, str):
                         color_tag = _classify_rgb_color(rgb_val)
-                    elif getattr(fg, "theme", None) is not None:
-                        if fg.theme in (4, 5):
-                            color_tag = "🎨빨강강조"
 
             if val_str and color_tag:
-                final_val = val_str if cell.row == 1 else f"{val_str} [{color_tag}]"
+                final_val = val_str if cell.row <= 2 else f"{val_str} [{color_tag}]"
                 has_any_content = True
-            elif not val_str and color_tag:
+            elif not val_str and color_tag and cell.row > 2:
                 final_val = f"[빈칸·{color_tag}]"
                 has_any_content = True
             elif val_str:
@@ -126,7 +125,6 @@ def _read_excel_sheet_with_colors(wb: openpyxl.Workbook, sheet_name: str) -> pd.
     if not rows_data:
         return pd.DataFrame()
 
-    # 상단 10행 이내에서 가장 유효 컬럼이 많은 행을 헤더로 자동 선택 (배민 TC 등 상단 여백 대응)
     header_idx = 0
     best_non_empty = 0
     for idx in range(min(10, len(rows_data))):
@@ -158,7 +156,7 @@ def _read_excel_sheet_with_colors(wb: openpyxl.Workbook, sheet_name: str) -> pd.
     for col in df.columns:
         safe_list = [_safe_str(v) for v in df[col].tolist()]
         safe_series = pd.Series(safe_list, index=df.index, dtype=object)
-        has_color = any(("🎨" in s or "🔴" in s or "[빈칸" in s) for s in safe_list)
+        has_color = any(("🎨" in s or "[빈칸" in s) for s in safe_list)
 
         if not has_color:
             stripped_list = [_strip_color_tag(s) for s in safe_list]
