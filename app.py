@@ -9,6 +9,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import streamlit as st
 import pandas as pd
 import plotly.express as px
+
+from data_agent.config import (
+    PRIMARY_COLOR,
+    DISTINCT_PALETTE,
+    DEFAULT_DEFECT_THRESHOLD,
+    MODEL_LABELS,
+)
 from data_agent.graph import build_agent_graph
 from data_agent.excel_exporter import (
     export_analysis_to_excel,
@@ -24,12 +31,16 @@ from data_agent.tools.data_loader import (
     DB_PATH,
     TABLE_NAME,
 )
+from data_agent.tools.visualizer import (
+    render_validation_banner,
+    render_smart_charts,
+)
 
 CONFIG_DIR = Path(".streamlit")
 CONFIG_FILE = CONFIG_DIR / "config.toml"
 if not CONFIG_FILE.exists():
     CONFIG_DIR.mkdir(exist_ok=True)
-    CONFIG_FILE.write_text('[theme]\nprimaryColor = "#059669"\n', encoding="utf-8")
+    CONFIG_FILE.write_text(f'[theme]\nprimaryColor = "{PRIMARY_COLOR}"\n', encoding="utf-8")
 
 st.set_page_config(page_title="사내 데이터 분석 Agent", layout="wide")
 
@@ -65,16 +76,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-DISTINCT_PALETTE = ["#059669", "#2563EB", "#DC2626", "#D97706", "#7C3AED", "#0891B2", "#DB2777"]
-
 st.title("📊 자연어 기반 사내 데이터 분석 Agent")
-
-MODEL_LABELS = {
-    "cloud_groq": "⚡ Cloud: Groq (초고속 무료 API)",
-    "cloud_gemini": "☁️ Cloud: Gemini (Google 무료 API)",
-    "local_ollama": "🔒 Local: Ollama (사내보안 정밀 모드)",
-    "mock": "🧪 테스트 모드 (Mock·0.2초 검증)",
-}
 
 if "saved_results" not in st.session_state:
     st.session_state["saved_results"] = {}
@@ -87,7 +89,7 @@ if "pipeline_logs" not in st.session_state:
 
 
 # =====================================================================
-# ⚡ 실시간 파이프라인 가동현황 (1번 ~ 5번 배지: 분석 완료 시 4·5번 즉시 초록색 전환)
+# ⚡ 실시간 파이프라인 가동현황 (1번 ~ 5번 배지)
 # =====================================================================
 def render_pipeline_status(has_file: bool, has_query_df: bool, saved_results: dict):
     has_analysis = bool(saved_results)
@@ -95,8 +97,8 @@ def render_pipeline_status(has_file: bool, has_query_df: bool, saved_results: di
     has_excel_pkg = has_analysis and any(bool(v.get("excel_bytes")) for v in saved_results.values())
 
     steps = [
-        (1, "1. 문서·시트·색상 스캔", has_file, "다중 시트·배경색 스캔 완료" if has_file else "파일 업로드 대기"),
-        (2, "2. SQLite DB·정밀 집계", has_query_df, "DB 적재·한글 통계 완료" if has_query_df else "데이터 집계 대기"),
+        (1, "1. 문서·시트·색상 스캔", has_file, "다중 시트·양식 검증 완료" if has_file else "파일 업로드 대기"),
+        (2, "2. SQLite DB·정밀 집계", has_query_df, "전체 건수 DB 적재·통계 완료" if has_query_df else "데이터 집계 대기"),
         (3, "3. 3대 AI 병렬 추론", has_analysis, f"{len(saved_results)}개 모델 추론 완료" if has_analysis else "분석 실행 대기"),
         (4, "4. 리포트 품질 검증·보정", has_verified_report, "수치·양식 자동 정제 완료" if has_verified_report else "리포트 검증 대기"),
         (5, "5. 통합 리포트·엑셀 완료", has_excel_pkg, "다중 시트·차트 패키징 완료" if has_excel_pkg else "엑셀 생성 대기"),
@@ -105,17 +107,9 @@ def render_pipeline_status(has_file: bool, has_query_df: bool, saved_results: di
     cards_html = []
     for num, title, is_done, desc in steps:
         if is_done:
-            bg = "#ecfdf5"
-            border = "#10b981"
-            title_col = "#065f46"
-            sub_col = "#047857"
-            icon = "✅"
+            bg, border, title_col, sub_col, icon = "#ecfdf5", "#10b981", "#065f46", "#047857", "✅"
         else:
-            bg = "#f8fafc"
-            border = "#cbd5e1"
-            title_col = "#64748b"
-            sub_col = "#94a3b8"
-            icon = "⏳"
+            bg, border, title_col, sub_col, icon = "#f8fafc", "#cbd5e1", "#64748b", "#94a3b8", "⏳"
 
         cards_html.append(
             f'<div style="flex:1; min-width:155px; background:{bg}; border:2px solid {border}; '
@@ -159,25 +153,54 @@ def style_dataframe_with_colors(df: pd.DataFrame):
 
 
 def build_smart_sql(nl_query: str, df: pd.DataFrame, table_name: str) -> str:
+    """
+    [전체 건수 조회 완벽 복원]
+    - 검색창이 비어 있거나 '전체조회', '전체', '모두' 입력 시 LIMIT 없이 전체 데이터(예: 592건 전체)를 조회합니다.
+    - '1000건 조회', '상위 50개', '100건만'처럼 건수 제한을 입력하면 정확히 LIMIT N으로 변환합니다.
+    """
     if not nl_query or not nl_query.strip():
-        return f"SELECT * FROM {table_name} LIMIT 100;"
+        return f"SELECT * FROM {table_name};"
 
     q = nl_query.strip()
-    col_matches: dict[str, list[str]] = {}
+    if q.replace(" ", "") in ("전체", "전체조회", "전체데이터", "모두조회", "다보여줘", "전체보여줘", "all"):
+        return f"SELECT * FROM {table_name};"
 
-    if any(k in q for k in ["빨강", "빨간", "초록", "노랑", "배경", "색상", "색깔"]):
-        color_kw = "빨강" if ("빨강" in q or "빨간" in q) else ("초록" if "초록" in q else ("노랑" if "노랑" in q else "강조"))
+    # 1. 건수 제한(LIMIT N) 표현 먼저 추출 (예: "1000건 조회", "상위 50개", "limit 200")
+    limit_val = None
+    limit_match = re.search(r"(?:상위\s*|최대\s*|limit\s*)?(\d+)\s*(?:건|개|행|줄)(?:\s*만|\s*조회|\s*보여|\s*출력)?", q, re.IGNORECASE)
+    if not limit_match:
+        limit_match = re.search(r"limit\s+(\d+)", q, re.IGNORECASE)
+    if limit_match:
+        limit_val = int(limit_match.group(1))
+        # 건수 표현을 제거하여 아래 숫자 비교 조건(WHERE)과 충돌하지 않게 함
+        q_without_limit = (q[:limit_match.start()] + " " + q[limit_match.end():]).strip()
+    else:
+        q_without_limit = q
+
+    # 건수만 입력한 경우 (예: "1000건 조회", "500건") 바로 LIMIT 쿼리 반환
+    rem_cleaned = re.sub(r"(전체|조회|해줘|보여줘|출력|데이터|만|에서|중)", "", q_without_limit).strip()
+    if not rem_cleaned and limit_val is not None:
+        return f"SELECT * FROM {table_name} LIMIT {limit_val};"
+
+    # 2. 배경색 키워드 검색
+    if any(k in q_without_limit for k in ["빨강", "빨간", "초록", "노랑", "배경", "색상", "색깔"]):
+        color_kw = "빨강" if ("빨강" in q_without_limit or "빨간" in q_without_limit) else (
+            "초록" if "초록" in q_without_limit else ("노랑" if "노랑" in q_without_limit else "강조")
+        )
         or_likes = [f'"{col}" LIKE \'%{color_kw}%\'' for col in df.columns]
-        return f"SELECT * FROM {table_name} WHERE " + " OR ".join(or_likes) + " LIMIT 100;"
+        sql = f"SELECT * FROM {table_name} WHERE " + " OR ".join(or_likes)
+        return f"{sql} LIMIT {limit_val};" if limit_val else f"{sql};"
 
+    # 3. 범주형 컬럼 값 매칭 (같은 컬럼 내 복수 값은 OR로 연결)
+    col_matches: dict[str, list[str]] = {}
     str_cols = df.select_dtypes(include=["object", "category"]).columns.tolist()
     for col in str_cols:
         matched_vals = []
         for val in df[col].dropna().astype(str).unique():
             val_clean = re.sub(r"\s*\[[^\]]+\]", "", val).strip()
-            if not val_clean or val_clean == "-" or len(val_clean) > 40:
+            if not val_clean or val_clean == "-" or len(val_clean) > 45:
                 continue
-            if val_clean.lower() in q.lower() or f"{val_clean}{col}".lower() in q.lower():
+            if val_clean.lower() in q_without_limit.lower() or f"{val_clean}{col}".lower() in q_without_limit.lower():
                 matched_vals.append(val_clean)
         if matched_vals:
             col_matches[col] = list(dict.fromkeys(matched_vals))
@@ -190,39 +213,53 @@ def build_smart_sql(nl_query: str, df: pd.DataFrame, table_name: str) -> str:
             or_part = " OR ".join(f'"{col}" LIKE \'%{v}%\'' for v in vals)
             where_clauses.append(f"({or_part})")
 
+    # 4. 수치형 컬럼 범위 조건 매칭 (예: "생산량 1200 이상", "불량수 20 초과")
     num_cols = df.select_dtypes(include=["number"]).columns.tolist()
-    nums = re.findall(r"\d+(?:\.\d+)?", q)
+    nums = re.findall(r"\d+(?:\.\d+)?", q_without_limit)
     if nums and num_cols:
-        target_num = nums[0]
-        target_col = next((col for col in num_cols if col.lower() in q.lower()), None)
+        target_num = float(nums[0])
+        target_col = next((col for col in num_cols if col.lower() in q_without_limit.lower()), None)
         if target_col is None:
             for col in num_cols:
-                if ("불량" in q and "불량" in col) or ("생산" in q and "생산" in col) or ("가동" in q and "가동" in col):
+                if ("불량" in q_without_limit and "불량" in col) or ("생산" in q_without_limit and "생산" in col) or ("가동" in q_without_limit and "가동" in col):
                     target_col = col
                     break
             if target_col is None:
-                target_col = num_cols[0]
+                # 데이터 실제 최소~최대 범위에 속하는 수치 컬럼 자동 추론
+                for col in num_cols:
+                    s_num = df[col].dropna()
+                    if len(s_num) > 0 and float(s_num.min()) <= target_num <= float(s_num.max()):
+                        target_col = col
+                        break
         if target_col:
-            if any(k in q for k in ["넘", "초과", "보다 큰", "많은", "높은", ">"]):
-                op = ">=" if "이상" in q else ">"
-            elif any(k in q for k in ["이상", "부터", ">="]):
+            num_str = nums[0]
+            if any(k in q_without_limit for k in ["넘", "초과", "보다 큰", "많은", "높은", ">"]):
+                op = ">=" if "이상" in q_without_limit else ">"
+            elif any(k in q_without_limit for k in ["이상", "부터", ">="]):
                 op = ">="
-            elif any(k in q for k in ["미만", "보다 작은", "적은", "낮은", "<"]):
+            elif any(k in q_without_limit for k in ["미만", "보다 작은", "적은", "낮은", "<"]):
                 op = "<"
-            elif any(k in q for k in ["이하", "이내", "까지", "<="]):
+            elif any(k in q_without_limit for k in ["이하", "이내", "까지", "<="]):
                 op = "<="
             else:
                 op = "="
-            where_clauses.append(f'"{target_col}" {op} {target_num}')
+            where_clauses.append(f'"{target_col}" {op} {num_str}')
 
     sql = f"SELECT * FROM {table_name}"
     if where_clauses:
         sql += " WHERE " + " AND ".join(where_clauses)
-    sql += " LIMIT 100;"
+    if limit_val is not None:
+        sql += f" LIMIT {limit_val}"
+    sql += ";"
     return sql
 
 
-def generate_smart_assistant_question(target_df: pd.DataFrame, raw_df: pd.DataFrame, user_filter_text: str) -> str:
+def generate_smart_assistant_question(
+    target_df: pd.DataFrame,
+    raw_df: pd.DataFrame,
+    user_filter_text: str,
+    defect_threshold: float = DEFAULT_DEFECT_THRESHOLD,
+) -> str:
     if len(target_df) == 0:
         return "현재 데이터의 핵심 현황, 이상·주의 항목, 원인 가설 및 실무 조치 제안을 정리해 줘."
 
@@ -236,8 +273,8 @@ def generate_smart_assistant_question(target_df: pd.DataFrame, raw_df: pd.DataFr
         sheets = target_df["시트명"].unique().tolist()
         scope_parts.append(f"대상 시트 {len(sheets)}개({', '.join(map(str, sheets[:3]))})")
 
-    stat_snippets = [f"총 {len(target_df)}건"]
-    scope_title = " · ".join(scope_parts) if scope_parts else "현재 조회 데이터"
+    stat_snippets = [f"총 {len(target_df):,}건"]
+    scope_title = " · ".join(scope_parts) if scope_parts else "전체 조회 데이터"
 
     if "생산량" in all_cols and "불량수" in all_cols:
         p_sum = int(target_df["생산량"].sum())
@@ -247,26 +284,26 @@ def generate_smart_assistant_question(target_df: pd.DataFrame, raw_df: pd.DataFr
         stat_str = ", ".join(stat_snippets)
         return (
             f"[AI 비서 자동 맞춤 질문] {scope_title} ({stat_str}) 데이터를 바탕으로 "
-            f"① 라인·일자별 핵심 추세 및 불량 비중(%), ② 사내 기준(1.5%) 초과 이상 구간, "
+            f"① 라인·일자별 핵심 추세 및 불량 비중(%), ② 사내 기준({defect_threshold}%) 초과 이상 구간, "
             f"③ 공정·설비·작업 관점 원인 가설, ④ 담당 부서별 즉시 조치(24h) 및 근본 대책(1개월)을 정밀 분석해 줘."
         )
 
-    if any(k in cols_lower for k in ["procedure", "pass/fail", "actual", "precondition", "domain", "tc"]):
+    if any(k in cols_lower for k in ["procedure", "pass/fail", "actual", "precondition", "pre-condition", "domain", "sub system", "tc"]):
         row_text = target_df.astype(str).agg(" ".join, axis=1)
         red_cnt = int(row_text.str.contains("빨강|불합격|FAIL|주의", case=False, regex=True).sum())
         if red_cnt > 0:
             stat_snippets.append(f"🔴색상강조/주의 표시 {red_cnt}건 감지")
-        for c_cand in ["Domain", "App"]:
+        for c_cand in ["Domain", "Sub System", "App", "Automated"]:
             if c_cand in all_cols:
                 vals = [str(v) for v in target_df[c_cand].unique().tolist() if str(v) != "-"]
                 if vals:
                     stat_snippets.append(f"{c_cand}[{', '.join(vals[:3])}]")
         stat_str = ", ".join(stat_snippets)
         return (
-            f"[AI 비서 자동 맞춤 질문] {scope_title} ({stat_str}) TC 검증 절차 데이터를 바탕으로 "
-            f"① 도메인(Domain)·서브시스템(App/Module)별 분포와 비중(%), "
-            f"② 주요 기능 시나리오(Video Encode 코덱별, Decode, Multiple Instances 등) 집중도 및 대표 TC(ID·Title), "
-            f"③ Actual Result 판정 현황(정상/🔴빨강강조 주의/미기입 공란) 및 예외·경계값 커버리지 리스크, "
+            f"[AI 비서 자동 맞춤 질문] {scope_title} ({stat_str}) TC 검증 데이터를 바탕으로 "
+            f"① 도메인(Domain)·서브시스템(Sub System/App/IP)별 분포와 비중(%), "
+            f"② 주요 기능 시나리오(Title 키워드 묶음 및 수행 특성) 집중도와 대표 TC(ID·Title), "
+            f"③ 판정 현황(정상/🔴빨강강조 주의/미기입 공란) 및 예외·경계값 커버리지 리스크, "
             f"④ QA·개발팀의 즉시 조치(24h) 및 검증 표준화 대책(1개월)을 마크다운 표 없이 깔끔한 불릿으로 분석해 줘."
         )
 
@@ -303,12 +340,12 @@ def render_related_links_box(target_df: pd.DataFrame):
     keywords = []
     if "불량유형" in all_cols:
         keywords.extend(target_df["불량유형"].dropna().astype(str).unique()[:2].tolist())
-    elif "App" in all_cols or "Domain" in all_cols:
-        for c in ["Domain", "App"]:
+    elif any(c in all_cols for c in ["Sub System", "Domain", "App"]):
+        for c in ["Domain", "Sub System", "App"]:
             if c in all_cols:
                 vals = [str(v) for v in target_df[c].astype(str).unique() if str(v) != "-"]
                 keywords.extend(vals[:1])
-        keywords.append("비디오 코덱 검증 테스트")
+        keywords.append("임베디드 SW 검증 테스트")
     else:
         cat_cols = target_df.select_dtypes(include=["object", "category"]).columns.tolist()
         if cat_cols:
@@ -340,172 +377,12 @@ def render_related_links_box(target_df: pd.DataFrame):
             )
 
 
-def render_smart_charts(target_df: pd.DataFrame, key_prefix: str = "main"):
-    if len(target_df) == 0:
-        st.info("조회된 데이터가 없습니다.")
-        return
-
-    num_cols = target_df.select_dtypes(include=["number"]).columns.tolist()
-    all_cols = target_df.columns.tolist()
-
-    if num_cols:
-        cat_cols = target_df.select_dtypes(include=["object", "category"]).columns.tolist()
-        line_col = "라인" if "라인" in all_cols else ("생산라인" if "생산라인" in all_cols else (cat_cols[0] if cat_cols else all_cols[0]))
-        defect_type_col = next((c for c in ["불량유형", "불량원인", "유형", "분류", "카테고리"] if c in all_cols), None)
-        time_col = next((c for c in ["일자", "날짜", "주차", "월"] if c in all_cols), None)
-        shift_col = next((c for c in ["시간대", "교대", "근무조", "시간"] if c in all_cols), None)
-        val_col = "불량수" if "불량수" in num_cols else num_cols[0]
-
-        row1_c1, row1_c2 = st.columns(2)
-        with row1_c1:
-            if "생산량" in num_cols and "불량수" in num_cols and line_col in all_cols:
-                agg_line = target_df.groupby(line_col, as_index=False)[["생산량", "불량수"]].sum()
-                agg_line["불량률(%)"] = (agg_line["불량수"] / agg_line["생산량"] * 100).round(2)
-                agg_line["표시라벨"] = agg_line.apply(lambda r: f"{int(r['불량수'])}개 ({r['불량률(%)']}%)", axis=1)
-                fig1 = px.bar(
-                    agg_line, x=line_col, y="불량수", color=line_col, text="표시라벨",
-                    color_discrete_sequence=DISTINCT_PALETTE,
-                    title=f"① {line_col}별 총 불량수 및 평균 불량률(%) 비교",
-                )
-                fig1.update_traces(textposition="outside")
-                st.plotly_chart(fig1, use_container_width=True, key=f"{key_prefix}_num1")
-            else:
-                agg_basic = target_df.groupby(line_col, as_index=False)[val_col].sum()
-                fig1 = px.bar(
-                    agg_basic, x=line_col, y=val_col, color=line_col, text_auto=True,
-                    color_discrete_sequence=DISTINCT_PALETTE,
-                    title=f"① {line_col}별 {val_col} 합계 비교",
-                )
-                fig1.update_traces(textposition="outside")
-                st.plotly_chart(fig1, use_container_width=True, key=f"{key_prefix}_num1")
-
-        with row1_c2:
-            if defect_type_col:
-                agg_defect = target_df.groupby([defect_type_col, line_col], as_index=False)[val_col].sum()
-                fig2 = px.bar(
-                    agg_defect, x=defect_type_col, y=val_col, color=line_col, barmode="group", text_auto=True,
-                    color_discrete_sequence=DISTINCT_PALETTE,
-                    title=f"② {defect_type_col}별 · {line_col}별 {val_col} 분류",
-                )
-                fig2.update_traces(textposition="outside")
-                st.plotly_chart(fig2, use_container_width=True, key=f"{key_prefix}_num2")
-            else:
-                agg_pie = target_df.groupby(line_col, as_index=False)[val_col].sum()
-                fig2 = px.pie(
-                    agg_pie, names=line_col, values=val_col, hole=0.4,
-                    color_discrete_sequence=DISTINCT_PALETTE,
-                    title=f"② {line_col}별 {val_col} 비중",
-                )
-                st.plotly_chart(fig2, use_container_width=True, key=f"{key_prefix}_num2")
-
-        row2_c1, row2_c2 = st.columns(2)
-        with row2_c1:
-            if time_col:
-                plot_df = target_df.copy()
-                if "생산량" in plot_df.columns and "불량수" in plot_df.columns:
-                    agg_time = plot_df.groupby([time_col, line_col], as_index=False)[["생산량", "불량수"]].sum()
-                    agg_time["불량률(%)"] = (agg_time["불량수"] / agg_time["생산량"] * 100).round(2)
-                    fig3 = px.line(
-                        agg_time, x=time_col, y="불량률(%)", color=line_col, markers=True, text="불량률(%)",
-                        color_discrete_sequence=DISTINCT_PALETTE,
-                        title=f"③ {time_col}별 불량률(%) 추이 (기준 1.5% 점선)",
-                    )
-                    fig3.add_hline(y=1.5, line_dash="dash", line_color="#DC2626", annotation_text="사내 기준 (1.5%)")
-                    st.plotly_chart(fig3, use_container_width=True, key=f"{key_prefix}_num3")
-        with row2_c2:
-            if shift_col:
-                agg_shift = target_df.groupby([shift_col, defect_type_col or line_col], as_index=False)[val_col].sum()
-                fig4 = px.bar(
-                    agg_shift, x=shift_col, y=val_col, color=defect_type_col or line_col, barmode="group", text_auto=True,
-                    color_discrete_sequence=DISTINCT_PALETTE,
-                    title=f"④ {shift_col}별 비교",
-                )
-                st.plotly_chart(fig4, use_container_width=True, key=f"{key_prefix}_num4")
-        return
-
-    primary_cat = next((c for c in ["App", "Domain", "Category", "시트명", "구분", "분류"] if c in all_cols), all_cols[0])
-    secondary_cat = next((c for c in ["Domain", "App", "Pass/Fail Criteria", "Precondition", "시트명"] if c in all_cols and c != primary_cat), all_cols[min(1, len(all_cols) - 1)])
-    result_col = next((c for c in all_cols if any(k in c.lower() for k in ["actual", "result", "status", "결과", "판정", "상태"])), all_cols[-1])
-
-    r1_c1, r1_c2 = st.columns(2)
-    with r1_c1:
-        vc1 = target_df[primary_cat].astype(str).value_counts().reset_index()
-        vc1.columns = [primary_cat, "건수"]
-        vc1["비중(%)"] = (vc1["건수"] / len(target_df) * 100).round(1)
-        vc1["표시라벨"] = vc1.apply(lambda r: f"{r['건수']}건 ({r['비중(%)']}%)", axis=1)
-        fig_c1 = px.bar(
-            vc1.head(15), x=primary_cat, y="건수", color=primary_cat, text="표시라벨",
-            color_discrete_sequence=DISTINCT_PALETTE,
-            title=f"① [{primary_cat}]별 데이터 건수 및 비중(%) 현황",
-        )
-        fig_c1.update_traces(textposition="outside")
-        st.plotly_chart(fig_c1, use_container_width=True, key=f"{key_prefix}_cat1")
-
-    with r1_c2:
-        vc_res = target_df[result_col].astype(str).value_counts().reset_index()
-        vc_res.columns = [result_col, "건수"]
-        fig_c2 = px.pie(
-            vc_res.head(10), names=result_col, values="건수", hole=0.4,
-            color_discrete_sequence=["#059669", "#2563EB", "#DC2626", "#D97706", "#7C3AED"],
-            title=f"② [{result_col}] 판정 · 셀 배경색 및 기재 상태 비중",
-        )
-        fig_c2.update_traces(textinfo="label+percent+value")
-        st.plotly_chart(fig_c2, use_container_width=True, key=f"{key_prefix}_cat2")
-
-    r2_c1, r2_c2 = st.columns(2)
-    with r2_c1:
-        comp_rows = []
-        for col in all_cols:
-            s_str = target_df[col].astype(str).str.strip()
-            empty_c = int(s_str.isin(["-", "", "None", "nan"]).sum() + s_str.str.startswith("[빈칸").sum())
-            color_c = int(s_str.str.contains("🎨|빨강|초록|노랑|주황", regex=True).sum())
-            normal_c = max(0, len(target_df) - empty_c - color_c)
-            comp_rows.append({"컬럼명": col, "구분": "일반 텍스트 기재", "건수": normal_c})
-            if color_c > 0:
-                comp_rows.append({"컬럼명": col, "구분": "🎨 색상강조/배경표시", "건수": color_c})
-            if empty_c > 0:
-                comp_rows.append({"컬럼명": col, "구분": "⚪ 미기재(빈칸)", "건수": empty_c})
-        comp_df = pd.DataFrame(comp_rows)
-        fig_c3 = px.bar(
-            comp_df, x="컬럼명", y="건수", color="구분", barmode="stack", text_auto=True,
-            color_discrete_map={
-                "일반 텍스트 기재": "#059669",
-                "🎨 색상강조/배경표시": "#DC2626",
-                "⚪ 미기재(빈칸)": "#9CA3AF",
-            },
-            title="③ 컬럼별 데이터 작성 현황 (텍스트 기재 vs 🎨색상표시 vs ⚪미기재)",
-        )
-        st.plotly_chart(fig_c3, use_container_width=True, key=f"{key_prefix}_cat3")
-
-    with r2_c2:
-        if primary_cat != secondary_cat:
-            cross_df = target_df.groupby([primary_cat, secondary_cat], as_index=False).size()
-            cross_df.columns = [primary_cat, secondary_cat, "건수"]
-            fig_c4 = px.bar(
-                cross_df.head(20), x=primary_cat, y="건수", color=secondary_cat, barmode="group", text_auto=True,
-                color_discrete_sequence=DISTINCT_PALETTE,
-                title=f"④ [{primary_cat}] x [{secondary_cat}] 교차 분류 건수",
-            )
-            fig_c4.update_traces(textposition="outside")
-            st.plotly_chart(fig_c4, use_container_width=True, key=f"{key_prefix}_cat4")
-
-
 @st.dialog("📊 AI 모델별 상세 시각화 대시보드 & 인사이트 리포트", width="large")
-def show_model_visual_popup(m_code: str, res_data: dict, target_df: pd.DataFrame):
+def show_model_visual_popup(m_code: str, res_data: dict, target_df: pd.DataFrame, defect_threshold: float):
     st.markdown(f"## {MODEL_LABELS.get(m_code, m_code)}")
-    st.caption(f"⏱️ 분석 소요 시간: **{res_data['elapsed_time']}초** | 분석 대상 데이터: **{len(target_df)}건**")
+    st.caption(f"⏱️ 분석 소요 시간: **{res_data['elapsed_time']}초** | 분석 대상 데이터: **{len(target_df):,}건**")
 
-    row_text = target_df.astype(str).agg(" ".join, axis=1)
-    red_cnt = int(row_text.str.contains("빨강|불합격|FAIL", case=False, regex=True).sum())
-
-    k1, k2, k3, k4 = st.columns(4)
-    k1.metric("조회 데이터 건수", f"{len(target_df):,} 건")
-    k2.metric("전체 컬럼 수", f"{len(target_df.columns)} 개")
-    k3.metric("🔴 색상강조/주의 감지", f"{red_cnt:,} 건")
-    k4.metric("AI 응답 속도", f"{res_data['elapsed_time']} 초")
-
-    st.divider()
-    render_smart_charts(target_df, key_prefix=f"popup_{m_code}")
+    render_smart_charts(target_df, key_prefix=f"popup_{m_code}", defect_threshold=defect_threshold)
     st.divider()
 
     st.markdown("#### 📝 AI 생성 전체 리포트")
@@ -522,23 +399,28 @@ def show_model_visual_popup(m_code: str, res_data: dict, target_df: pd.DataFrame
 
 
 @st.fragment
-def render_visualization_fragment(target_df: pd.DataFrame, aux_sheets: dict[str, pd.DataFrame]):
+def render_visualization_fragment(
+    target_df: pd.DataFrame,
+    aux_sheets: dict[str, pd.DataFrame],
+    defect_threshold: float,
+):
     st.subheader("2️⃣ 조회된 데이터 다차원 시각화 & 한글 기초통계 집계")
     v_tab1, v_tab2, v_tab3 = st.tabs([
-        "🎯 핵심 다차원 대시보드 (수치형·범주형·배경색 자동 대응)",
+        "🎯 핵심 다차원 대시보드 (TOP 순위·시나리오 그룹핑·비중 자동 대응)",
         "🛠️ 자유 조합 커스텀 차트 (모든 엑셀/CSV/문서 범용)",
         "📋 한글 기초통계 & 시트통합·판정·배경색 문맥 집계표",
     ])
 
     with v_tab1:
-        render_smart_charts(target_df, key_prefix="main_dash")
+        render_smart_charts(target_df, key_prefix="main_dash", defect_threshold=defect_threshold)
 
     with v_tab2:
         num_cols = target_df.select_dtypes(include=["number"]).columns.tolist()
         all_cols = target_df.columns.tolist()
         if len(target_df) > 0:
             c1, c2, c3, c4 = st.columns(4)
-            x_col = c1.selectbox("X축 (기준 항목)", options=all_cols, index=0, key="frag_x")
+            default_x = next((i for i, c in enumerate(all_cols) if c in ["Sub System", "Domain", "App", "라인"]), 0)
+            x_col = c1.selectbox("X축 (기준 항목)", options=all_cols, index=default_x, key="frag_x")
             y_options = ["(건수 집계 - COUNT)"] + num_cols
             y_sel = c2.selectbox("Y축 (집계 대상)", options=y_options, index=0 if not num_cols else min(1, len(y_options) - 1), key="frag_y")
             color_options = ["(색상 분류 없음)"] + all_cols
@@ -563,12 +445,13 @@ def render_visualization_fragment(target_df: pd.DataFrame, aux_sheets: dict[str,
                 custom_df = target_df.groupby(grp_cols, as_index=False)[y_sel].mean().round(2)
                 y_plot = y_sel
 
+            custom_df = custom_df.sort_values(by=y_plot, ascending=False).head(30)
             fig_custom = px.bar(
-                custom_df.head(30), x=x_col, y=y_plot, color=color_col or x_col, barmode="group",
+                custom_df, x=x_col, y=y_plot, color=color_col or x_col, barmode="group",
                 text_auto=True, color_discrete_sequence=DISTINCT_PALETTE,
-                title=f"[{x_col}]별 {y_plot} 비교",
+                title=f"[{x_col}]별 {y_plot} 비교 (상위 30개)",
             )
-            fig_custom.update_traces(textposition="outside")
+            fig_custom.update_traces(textposition="outside", cliponaxis=False)
             st.plotly_chart(fig_custom, use_container_width=True, key="frag_custom_chart")
 
     with v_tab3:
@@ -585,10 +468,13 @@ def render_agent_analysis_section(
     selected_models: list[str],
     active_filter_text: str,
     aux_sheets: dict[str, pd.DataFrame],
+    defect_threshold: float,
 ):
     st.subheader("3️⃣ AI 비서 맞춤 질문 & 에이전트 동시 비교 분석 (Groq vs Gemini vs Ollama 정밀 모드)")
 
-    auto_assistant_q = generate_smart_assistant_question(target_df, raw_df, active_filter_text)
+    auto_assistant_q = generate_smart_assistant_question(
+        target_df, raw_df, active_filter_text, defect_threshold=defect_threshold
+    )
 
     q_mode = st.radio(
         "🤖 질문 생성 방식 선택",
@@ -600,7 +486,7 @@ def render_agent_analysis_section(
     )
 
     if q_mode.startswith("🤖"):
-        st.info(f"**💡 AI 비서가 현재 조회된 데이터({len(target_df)}건)에 맞춰 조합한 분석 질문입니다:**\n\n{auto_assistant_q}")
+        st.info(f"**💡 AI 비서가 현재 조회된 데이터({len(target_df):,}건)에 맞춰 조합한 분석 질문입니다:**\n\n{auto_assistant_q}")
         question = auto_assistant_q
     else:
         question = st.text_input("💡 에이전트에게 지시할 분석 질문을 입력하세요:", value=auto_assistant_q)
@@ -619,15 +505,16 @@ def render_agent_analysis_section(
             sample_rows_df = target_df.head(50)
             data_info = (
                 f"[조회 조건]: {active_filter_text or '전체 시트 데이터'}\n"
-                f"[조회 데이터 건수]: {len(target_df)}건\n"
+                f"[조회 데이터 건수]: {len(target_df)}건 (전체 원본 {len(raw_df)}건)\n"
+                f"[사내 품질 기준값]: {defect_threshold}%\n"
                 f"[컬럼 목록]: {list(target_df.columns)}\n\n"
                 f"[파이썬 정밀 집계표]\n{stat_summary_str}\n\n"
-                f"[상세 행 데이터 (배경색 태그 포함)]\n{sample_rows_df.to_string(index=False)}"
+                f"[상세 행 샘플 데이터 (상위 50건)]\n{sample_rows_df.to_string(index=False)}"
             )
 
             new_results = {}
             logs = [
-                f"**[1~2단계 완료]** 총 `{len(target_df)}건` 데이터 로드 및 파이썬 다차원 통계 집계 완료",
+                f"**[1~2단계 완료]** 총 `{len(target_df):,}건` 데이터 로드 및 파이썬 다차원 통계 집계 완료",
                 f"**[3단계 가동]** 선택 모델 `{len(selected_models)}개` 병렬 추론 시작",
             ]
             status_box = st.status("⚡ 선택한 AI 모델(정밀 모드)들을 동시에 병렬 실행하고 있습니다...", expanded=True)
@@ -637,6 +524,7 @@ def render_agent_analysis_section(
                     "question": question,
                     "mode": m_code,
                     "data_summary": data_info,
+                    "defect_threshold": defect_threshold,
                     "analysis_result": {},
                     "report": "",
                     "elapsed_time": 0.0,
@@ -707,7 +595,7 @@ def render_agent_analysis_section(
             res_item = saved[m_code]
             with cols[idx]:
                 if st.button(f"📊 {MODEL_LABELS.get(m_code, m_code)}\n(클릭 시 시각화 팝업 열기 🔍)", key=f"title_btn_{m_code}", use_container_width=True):
-                    show_model_visual_popup(m_code, res_item, popup_df)
+                    show_model_visual_popup(m_code, res_item, popup_df, defect_threshold)
 
                 st.info(f"⏱️ 소요 시간: **{res_item['elapsed_time']}초**")
                 st.markdown(res_item["report"])
@@ -723,7 +611,7 @@ def render_agent_analysis_section(
 
 
 # =====================================================================
-# ⚙️ 사이드바 설정
+# ⚙️ 사이드바 설정 (W47 사내 기준값 조절 기능 포함)
 # =====================================================================
 with st.sidebar:
     st.header("⚙️ 실행 및 비교 모델 설정")
@@ -740,6 +628,17 @@ with st.sidebar:
             default=["cloud_groq", "cloud_gemini", "local_ollama"],
             format_func=lambda x: MODEL_LABELS[x],
         )
+
+    st.divider()
+    st.subheader("🎚️ 사내 품질 기준값 설정 (W47)")
+    defect_threshold = st.slider(
+        "목표 불량률 / 관리 임계치 (%)",
+        min_value=0.1,
+        max_value=10.0,
+        value= float(DEFAULT_DEFECT_THRESHOLD),
+        step=0.1,
+        help="부서별 공정 기준에 맞춰 조절하면 차트 기준선과 AI 판정이 즉시 연동됩니다.",
+    )
 
     st.divider()
     ollama_models = get_installed_ollama_models()
@@ -765,18 +664,17 @@ if uploaded_file is None:
     render_pipeline_status(has_file=False, has_query_df=False, saved_results={})
     st.info("👆 분석할 사내 파일(.csv, .xlsx, .docx, .txt)을 업로드하면 1~5단계 실시간 파이프라인이 가동됩니다.")
 else:
-    # 4개 반환값(raw_df_all, sheet_names, sheet_counts, aux_sheets) 정확히 언패킹
     raw_df_all, sheet_names, sheet_counts, aux_sheets = load_and_sync_to_db(uploaded_file, selected_sheet="ALL")
 
     if len(sheet_names) > 1:
         sheet_summary = " | ".join(f"**{s}**: {cnt}건" for s, cnt in sheet_counts.items())
-        st.info(f"📑 **다중 시트/표 감지 (총 {len(sheet_names)}개 시트, 메인 분석 대상 {len(raw_df_all)}건):** {sheet_summary}")
+        st.info(f"📑 **다중 시트/표 감지 (총 {len(sheet_names)}개 시트, 메인 분석 대상 {len(raw_df_all):,}건):** {sheet_summary}")
         sheet_options = ["ALL"] + sheet_names
         chosen_sheet = st.radio(
             "조회할 시트 범위 선택:",
             options=sheet_options,
             index=0,
-            format_func=lambda x: f"📚 메인 시트 통합 조회 (총 {len(raw_df_all)}건)" if x == "ALL" else f"📄 {x} ({sheet_counts.get(x, 0)}건)",
+            format_func=lambda x: f"📚 메인 시트 통합 조회 (총 {len(raw_df_all):,}건)" if x == "ALL" else f"📄 {x} ({sheet_counts.get(x, 0):,}건)",
             horizontal=True,
         )
         if chosen_sheet == "ALL":
@@ -792,11 +690,15 @@ else:
                 st.markdown(f"**■ 시트명: `{a_name}`**")
                 st.dataframe(style_dataframe_with_colors(a_df), use_container_width=True, hide_index=True)
 
+    # 실시간 파이프라인 1~5번 상태 배지
     render_pipeline_status(
         has_file=True,
         has_query_df=len(raw_df) > 0,
         saved_results=st.session_state.get("saved_results", {}),
     )
+
+    # [W47 신규] 부서별 엑셀/문서 양식 자동 검증(Validation) 배너
+    render_validation_banner(raw_df)
 
     st.subheader("1️⃣ 자연어 기반 데이터 수집 및 SQLite DB 자동 조회")
     tab_nl, tab_kw, tab_sql = st.tabs(["🤖 자연어 → SQL 자동 변환", "🔍 키워드 조합 필터", "🗄️ 수동 SQL 편집기 (.db / .sql 추출)"])
@@ -806,14 +708,14 @@ else:
     with tab_nl:
         st.caption(
             f"테이블(`{TABLE_NAME}`) 컬럼: `{list(raw_df.columns)}` | "
-            "입력 예시: **'빨강 배경만 조회해줘'**, **'Video만 보여줘'**, **'A라인랑 B라인 조회해줘'**"
+            "💡 **비워두거나 '전체조회' 입력 시 전체 건수(100% 전체 행)가 조회**되며, `'상위 50건'`, `'Linux만'`, `'빨강 배경만'` 등 조건 입력도 가능합니다."
         )
-        nl_question = st.text_input("조회 조건을 자연어로 입력하세요 (비워두면 전체 데이터를 분석합니다):", value="")
+        nl_question = st.text_input("조회 조건을 자연어로 입력하세요 (비워두면 제한 없이 전체 데이터를 조회합니다):", value="")
         auto_sql = build_smart_sql(nl_question, raw_df, TABLE_NAME)
         st.code(auto_sql, language="sql")
         try:
             df = run_sql_query(auto_sql)
-            st.success(f"✅ SQL 자동 실행 완료: 전체 **{len(raw_df)}건** 중 **{len(df)}건** 조회됨")
+            st.success(f"✅ SQL 자동 실행 완료: 전체 **{len(raw_df):,}건** 중 **{len(df):,}건** 조회됨")
             st.dataframe(style_dataframe_with_colors(df), use_container_width=True, hide_index=True)
             if nl_question.strip():
                 active_filter_text = nl_question.strip()
@@ -823,7 +725,7 @@ else:
 
     with tab_kw:
         c1, c2 = st.columns([3, 1])
-        kw_input = c1.text_input("검색 키워드 입력 (쉼표 `,` 구분, 예: `빨강, VP9, Encode`)", value="")
+        kw_input = c1.text_input("검색 키워드 입력 (쉼표 `,` 구분, 예: `Linux, Android, Encode`)", value="")
         match_type = c2.radio("조건", options=["OR (하나라도 포함)", "AND (모두 포함)"], horizontal=True)
         if kw_input.strip():
             df = filter_by_keywords(raw_df, kw_input, match_all=match_type.startswith("AND"))
@@ -835,7 +737,7 @@ else:
         if st.button("▶️ 수동 SQL 실행"):
             try:
                 df = run_sql_query(sql_input)
-                st.success(f"쿼리 실행 성공: {len(df)}건 조회됨")
+                st.success(f"쿼리 실행 성공: {len(df):,}건 조회됨")
                 st.dataframe(style_dataframe_with_colors(df), use_container_width=True, hide_index=True)
             except Exception as e:
                 st.error(f"오류: {e}")
@@ -866,6 +768,8 @@ else:
     summary_df = target_df.describe(include="all").fillna("")
     st.divider()
 
-    render_visualization_fragment(target_df, aux_sheets)
+    render_visualization_fragment(target_df, aux_sheets, defect_threshold)
     st.divider()
-    render_agent_analysis_section(target_df, raw_df, summary_df, selected_models, active_filter_text, aux_sheets)
+    render_agent_analysis_section(
+        target_df, raw_df, summary_df, selected_models, active_filter_text, aux_sheets, defect_threshold
+    )
