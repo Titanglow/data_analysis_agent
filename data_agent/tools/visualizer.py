@@ -1,5 +1,4 @@
 # data_agent/tools/visualizer.py
-import re
 import streamlit as st
 import pandas as pd
 import plotly.express as px
@@ -11,22 +10,24 @@ from data_agent.excel_exporter import (
 )
 
 
+def is_manufacturing_df(df: pd.DataFrame) -> bool:
+    if df is None or len(df) == 0:
+        return False
+    cols = df.columns.tolist()
+    return "생산량" in cols and "불량수" in cols
+
+
 def validate_uploaded_dataframe(df: pd.DataFrame) -> dict:
-    """
-    [W47 핵심 기능] 부서별 다양한 엑셀/CSV 업로드 시 데이터 양식(Schema & Quality)을 자동 검증합니다.
-    - 데이터 도메인 유형(생산/제조 vs SW·TC 검증 vs 일반 문서) 자동 판별
-    - 결측(빈칸) 비율, 단일값(100% 동일) 컬럼, 고유 식별자(ID) 중복 여부, 색상 강조 셀 건수 점검
-    """
     if df is None or len(df) == 0:
         return {"status": "empty", "domain_type": "빈 데이터", "warnings": ["데이터가 비어 있습니다."], "metrics": {}}
 
     all_cols = df.columns.tolist()
-    cols_lower = " ".join(c.lower() for c in all_cols)
+    cols_lower = " ".join(str(c).lower() for c in all_cols)
     total_rows = len(df)
 
-    if "생산량" in all_cols and "불량수" in all_cols:
+    if is_manufacturing_df(df):
         domain_type = "🏭 제조·생산 품질 데이터"
-    elif any(k in cols_lower for k in ["procedure", "pass/fail", "sub system", "test type", "automated", "pre-condition", "actual"]):
+    elif any(k in cols_lower for k in ["procedure", "pass/fail", "sub system", "test type", "automated", "pre-condition", "actual", "priority", "category"]):
         domain_type = "🧪 SW/시스템 검증(TC) 데이터"
     else:
         domain_type = "📄 일반 사내 업무/문서 데이터"
@@ -37,7 +38,7 @@ def validate_uploaded_dataframe(df: pd.DataFrame) -> dict:
     informative_cols = []
 
     for col in all_cols:
-        s = df[col].astype(str).str.strip()
+        s = pd.Series([str(v).strip() for v in df[col].tolist()])
         empty_c = int(s.isin(["-", "", "None", "nan", "N/A"]).sum() + s.str.startswith("[빈칸").sum())
         empty_cells += empty_c
         valid_s = s[~s.isin(["-", "", "None", "nan", "N/A"])]
@@ -45,17 +46,16 @@ def validate_uploaded_dataframe(df: pd.DataFrame) -> dict:
         if nunq == 1 and total_rows > 1:
             single_val_cols.append(f"{col}('{valid_s.iloc[0]}')")
         elif 2 <= nunq <= 35:
-            informative_cols.append(col)
+            informative_cols.append(str(col))
 
     fill_rate = round((1 - (empty_cells / total_cells)) * 100, 1) if total_cells > 0 else 100.0
     color_df = analyze_color_cell_contexts(df)
     color_cnt = len(color_df)
 
-    # ID 컬럼 중복 체크
-    id_col = next((c for c in all_cols if c.lower() in ["id", "tc id", "tc_id", "_polarion"]), None)
+    id_col = next((c for c in all_cols if str(c).lower() in ["id", "tc id", "tc_id", "_polarion"]), None)
     dup_id_cnt = 0
     if id_col:
-        valid_ids = df[id_col].astype(str).str.strip()
+        valid_ids = pd.Series([str(v).strip() for v in df[id_col].tolist()])
         valid_ids = valid_ids[~valid_ids.isin(["-", "", "None", "nan"])]
         dup_id_cnt = int(valid_ids.duplicated().sum())
 
@@ -80,7 +80,6 @@ def validate_uploaded_dataframe(df: pd.DataFrame) -> dict:
 
 
 def render_validation_banner(df: pd.DataFrame):
-    """업로드된 파일의 양식 자동 검증(Validation) 결과를 한눈에 보여주는 배너"""
     val_res = validate_uploaded_dataframe(df)
     if val_res["status"] == "empty":
         return
@@ -104,25 +103,64 @@ def render_validation_banner(df: pd.DataFrame):
                 st.info(f"💡 **양식 자동 보정 안내:** {w}")
 
 
-def render_kpi_summary_cards(target_df: pd.DataFrame, defect_threshold: float = DEFAULT_DEFECT_THRESHOLD):
-    """차트 상단에 4대 핵심 KPI 요약 카드를 출력합니다."""
+def _pick_best_categorical_col(
+    df: pd.DataFrame,
+    preferred_names: list[str],
+    exclude: list[str] | None = None,
+    allow_single_value: bool = False,
+) -> str | None:
+    exclude_set = set(exclude or [])
+    all_cols = [c for c in df.columns if c not in exclude_set]
+    if not all_cols:
+        return None
+
+    for pref in preferred_names:
+        for col in all_cols:
+            if str(col).lower() == pref.lower() or pref.lower() in str(col).lower():
+                valid_s = pd.Series([str(v).strip() for v in df[col].tolist()])
+                valid_s = valid_s[~valid_s.isin(["-", "", "None", "nan"])]
+                nunq = valid_s.nunique()
+                if 2 <= nunq <= 40:
+                    return col
+
+    skip_keywords = ["_polarion", "id", "procedure", "description", "pre-condition", "post-condition", "inputdata", "title", "step", "expected"]
+    for col in all_cols:
+        if any(k in str(col).lower() for k in skip_keywords):
+            continue
+        valid_s = pd.Series([str(v).strip() for v in df[col].tolist()])
+        valid_s = valid_s[~valid_s.isin(["-", "", "None", "nan"])]
+        nunq = valid_s.nunique()
+        if 2 <= nunq <= 25:
+            return col
+
+    if allow_single_value:
+        for pref in preferred_names:
+            for col in all_cols:
+                if pref.lower() in str(col).lower():
+                    return col
+
+    return all_cols[0]
+
+
+def render_kpi_summary_cards(target_df: pd.DataFrame, threshold: float = DEFAULT_DEFECT_THRESHOLD):
     all_cols = target_df.columns.tolist()
     k1, k2, k3, k4 = st.columns(4)
 
-    if "생산량" in all_cols and "불량수" in all_cols:
+    if is_manufacturing_df(target_df):
         p_sum = int(target_df["생산량"].sum())
         d_sum = int(target_df["불량수"].sum())
         rate = (d_sum / p_sum * 100) if p_sum > 0 else 0.0
         top_def = target_df.groupby("불량유형")["불량수"].sum().idxmax() if "불량유형" in all_cols and d_sum > 0 else "-"
-        delta_str = f"기준({defect_threshold}%) 초과 🚨" if rate > defect_threshold else f"기준({defect_threshold}%) 이내 ✅"
+        delta_str = f"기준({threshold}%) 초과 🚨" if rate > threshold else f"기준({threshold}%) 이내 ✅"
         k1.metric("📌 조회 데이터 건수", f"{len(target_df):,} 건")
         k2.metric("🏭 총 생산량 / 불량수", f"{p_sum:,}개 / {d_sum:,}개")
-        k3.metric(f"🚨 평균 불량률 (기준 {defect_threshold}%)", f"{rate:.2f} %", delta=delta_str, delta_color="inverse" if rate > defect_threshold else "normal")
+        k3.metric(f"🚨 평균 불량률 (기준 {threshold}%)", f"{rate:.2f} %", delta=delta_str, delta_color="inverse" if rate > threshold else "normal")
         k4.metric("🔍 최다 발생 불량유형", str(top_def))
     else:
-        # 유의미한 대표 분류 컬럼 찾기 (고유값 2개 이상)
-        cat_col = _pick_best_categorical_col(target_df, ["Domain", "Sub System", "App", "IP", "시트명", "분류"])
+        cat_col = _pick_best_categorical_col(target_df, ["Sub System", "Category", "Domain", "App", "IP", "Priority", "시트명", "분류"])
         top_cat_str = "-"
+        focus_cnt = 0
+        focus_cut = threshold if threshold >= 5.0 else 20.0
         if cat_col:
             vc = target_df[cat_col].astype(str).value_counts()
             if not vc.empty:
@@ -130,11 +168,11 @@ def render_kpi_summary_cards(target_df: pd.DataFrame, defect_threshold: float = 
                 top_cnt = int(vc.iloc[0])
                 top_pct = round(top_cnt / len(target_df) * 100, 1)
                 top_cat_str = f"{shorten_long_label(top_val, 14)} ({top_cnt}건·{top_pct}%)"
+                focus_cnt = int(((vc / len(target_df) * 100) >= focus_cut).sum())
 
-        # 자동화 여부 또는 판정 현황
         auto_or_res_col = _pick_best_categorical_col(
             target_df,
-            ["Automated", "Test Type", "PASS/FAIL", "Actual Result", "Result", "Status"],
+            ["Automated", "Priority", "Test Type", "Execution Status", "PASS/FAIL", "Actual Result", "Result"],
             exclude=[cat_col] if cat_col else [],
         )
         sub_metric_label = "⚙️ 주요 속성 분포"
@@ -145,63 +183,18 @@ def render_kpi_summary_cards(target_df: pd.DataFrame, defect_threshold: float = 
                 v_name = vc2.index[0]
                 v_cnt = int(vc2.iloc[0])
                 v_pct = round(v_cnt / len(target_df) * 100, 1)
-                sub_metric_label = f"📊 [{auto_or_res_col}] 최다 비중"
+                sub_metric_label = f"📊 [{auto_or_res_col}] 최다"
                 sub_metric_val = f"{shorten_long_label(v_name, 14)} ({v_pct}%)"
 
         color_df = analyze_color_cell_contexts(target_df)
-        row_text = target_df.astype(str).agg(" ".join, axis=1)
-        issue_cnt = max(len(color_df), int(row_text.str.contains("빨강|불합격|FAIL|주의|오류", case=False, regex=True).sum()))
-
         k1.metric("📌 총 조회 데이터 건수", f"{len(target_df):,} 건")
         k2.metric(f"🏆 [{cat_col or '분류'}] 1위 비중", top_cat_str)
         k3.metric(sub_metric_label, sub_metric_val)
-        k4.metric("🎨 강조/주의/FAIL 감지", f"{issue_cnt:,} 건")
-
-
-def _pick_best_categorical_col(
-    df: pd.DataFrame,
-    preferred_names: list[str],
-    exclude: list[str] | None = None,
-    allow_single_value: bool = False,
-) -> str | None:
-    """
-    단일값(100% 똑같은 값, 예: Type='Requirement Test Case')이나 ID 컬럼을 피하고,
-    실제로 2개 이상의 값을 가진 유의미한 분류 컬럼을 스마트하게 선택합니다.
-    """
-    exclude_set = set(exclude or [])
-    all_cols = [c for c in df.columns if c not in exclude_set]
-    if not all_cols:
-        return None
-
-    # 1순위: preferred_names 중 고유값이 2~40개인 컬럼
-    for pref in preferred_names:
-        for col in all_cols:
-            if col.lower() == pref.lower() or pref.lower() in col.lower():
-                valid_s = df[col].astype(str).str.strip()
-                valid_s = valid_s[~valid_s.isin(["-", "", "None", "nan"])]
-                nunq = valid_s.nunique()
-                if 2 <= nunq <= 40:
-                    return col
-
-    # 2순위: 전체 컬럼 중 고유값이 2~25개인 범주형 컬럼 (ID, 절차서 장문 제외)
-    skip_keywords = ["_polarion", "id", "procedure", "description", "pre-condition", "post-condition", "inputdata", "title"]
-    for col in all_cols:
-        if any(k in col.lower() for k in skip_keywords):
-            continue
-        valid_s = df[col].astype(str).str.strip()
-        valid_s = valid_s[~valid_s.isin(["-", "", "None", "nan"])]
-        nunq = valid_s.nunique()
-        if 2 <= nunq <= 25:
-            return col
-
-    # 3순위: 단일값이라도 허용하는 경우 preferred_names에서 선택
-    if allow_single_value:
-        for pref in preferred_names:
-            for col in all_cols:
-                if pref.lower() in col.lower():
-                    return col
-
-    return all_cols[0]
+        # 배경색이 있는 엑셀일 때만 색상강조 건수를 보여주고, 0건이면 '중점 관리 영역 수(사내 기준값 연동)'를 표시!
+        if len(color_df) > 0:
+            k4.metric("🎨 셀 색상강조 감지", f"{len(color_df):,} 건")
+        else:
+            k4.metric(f"🎯 중점 모듈 (비중 {focus_cut:.0f}%↑)", f"{focus_cnt} 개 영역")
 
 
 def render_smart_charts(
@@ -209,30 +202,18 @@ def render_smart_charts(
     key_prefix: str = "main",
     defect_threshold: float = DEFAULT_DEFECT_THRESHOLD,
 ):
-    """
-    [W47 고도화 시각화]
-    - 상단 4대 핵심 KPI 카드 표시
-    - 수치형(생산/불량) 데이터: 라인별 불량률, 불량유형별 분포, 일자별 추이(사내 기준선 연동), 교대별 비교
-    - 범주형/TC(Polarion, 검증 시트 등) 데이터:
-      ① 1순위 분류(Domain/Sub System) 가로형 TOP 순위 막대 차트
-      ② 2순위 핵심 속성(Automated/Test Type/Sub System/판정) 도넛 차트 (단일값 100% 컬럼 자동 배제!)
-      ③ Title/시나리오 유사 키워드 자동 그룹핑 가로 막대 차트
-      ④ 주요 분류 교차 분석(Domain × Sub System / Automated) 차트
-    """
     if len(target_df) == 0:
         st.info("조회된 데이터가 없습니다.")
         return
 
-    render_kpi_summary_cards(target_df, defect_threshold=defect_threshold)
+    render_kpi_summary_cards(target_df, threshold=defect_threshold)
     st.markdown("<div style='margin-bottom:8px;'></div>", unsafe_allow_html=True)
 
     num_cols = target_df.select_dtypes(include=["number"]).columns.tolist()
     all_cols = target_df.columns.tolist()
 
-    # =========================================================================
-    # CASE A: 제조·생산 등 수치형 데이터가 있는 경우
-    # =========================================================================
-    if num_cols and ("생산량" in num_cols or "불량수" in num_cols or len(num_cols) >= 2):
+    # CASE A: 제조·생산 수치 데이터
+    if is_manufacturing_df(target_df) or (num_cols and len(num_cols) >= 2):
         cat_cols = target_df.select_dtypes(include=["object", "category"]).columns.tolist()
         line_col = "라인" if "라인" in all_cols else ("생산라인" if "생산라인" in all_cols else (cat_cols[0] if cat_cols else all_cols[0]))
         defect_type_col = next((c for c in ["불량유형", "불량원인", "유형", "분류", "카테고리"] if c in all_cols), None)
@@ -246,14 +227,17 @@ def render_smart_charts(
                 agg_line = target_df.groupby(line_col, as_index=False)[["생산량", "불량수"]].sum()
                 agg_line["불량률(%)"] = (agg_line["불량수"] / agg_line["생산량"] * 100).round(2)
                 agg_line = agg_line.sort_values(by="불량수", ascending=True)
-                agg_line["표시라벨"] = agg_line.apply(lambda r: f"{int(r['불량수']):,}개 ({r['불량률(%)']}%)", axis=1)
+                agg_line["표시라벨"] = agg_line.apply(
+                    lambda r: f"{int(r['불량수']):,}개 ({r['불량률(%)']}%) {'🚨초과' if r['불량률(%)'] > defect_threshold else '✅'}",
+                    axis=1,
+                )
                 fig1 = px.bar(
                     agg_line, x="불량수", y=line_col, orientation="h", color=line_col, text="표시라벨",
                     color_discrete_sequence=DISTINCT_PALETTE,
-                    title=f"① [{line_col}]별 총 불량수 및 불량률(%) 순위",
+                    title=f"① [{line_col}]별 총 불량수 및 기준({defect_threshold}%) 판정",
                 )
                 fig1.update_traces(textposition="outside", cliponaxis=False)
-                fig1.update_layout(showlegend=False, margin=dict(l=20, r=60, t=45, b=20))
+                fig1.update_layout(showlegend=False, margin=dict(l=20, r=70, t=45, b=20))
                 st.plotly_chart(fig1, use_container_width=True, key=f"{key_prefix}_num1")
             else:
                 agg_basic = target_df.groupby(line_col, as_index=False)[val_col].sum().sort_values(by=val_col, ascending=True)
@@ -292,7 +276,7 @@ def render_smart_charts(
                 fig3 = px.line(
                     agg_time, x=time_col, y="불량률(%)", color=line_col, markers=True, text="불량률(%)",
                     color_discrete_sequence=DISTINCT_PALETTE,
-                    title=f"③ [{time_col}]별 불량률(%) 추이 (사내 기준 {defect_threshold}% 점선)",
+                    title=f"③ [{time_col}]별 불량률(%) 추이 (사내 기준 {defect_threshold}% 빨간 점선)",
                 )
                 fig3.add_hline(
                     y=defect_threshold, line_dash="dash", line_color="#DC2626",
@@ -310,56 +294,59 @@ def render_smart_charts(
                 st.plotly_chart(fig4, use_container_width=True, key=f"{key_prefix}_num4")
         return
 
-    # =========================================================================
-    # CASE B: TC 검증 시트 / Polarion 엑셀 / 일반 범주형 문서 데이터
-    # (단일값 100% 컬럼을 배제하고 가장 인사이트가 높은 4대 차트 자동 구성)
-    # =========================================================================
+    # CASE B: TC 검증 시트 / 배민 TC / Polarion TC / 일반 문서
     primary_cat = _pick_best_categorical_col(
         target_df,
-        ["Sub System", "Domain", "App", "IP", "시트명", "Category", "분류"],
+        ["Sub System", "Category", "Domain", "App", "IP", "Priority", "시트명", "분류"],
         allow_single_value=True,
     )
     secondary_cat = _pick_best_categorical_col(
         target_df,
-        ["Domain", "Automated", "Test Type", "Sub System", "IP", "Actual Result", "PASS/FAIL", "시트명"],
+        ["Domain", "Priority", "Automated", "Test Type", "Test Technique", "Execution Status", "Sub System", "IP", "Actual Result", "PASS/FAIL"],
         exclude=[primary_cat] if primary_cat else [],
         allow_single_value=False,
+    ) or _pick_best_categorical_col(
+        target_df, ["Automated", "Test Type", "Execution Status", "Actual Result", "Type"],
+        exclude=[primary_cat] if primary_cat else [], allow_single_value=True,
     )
-    if not secondary_cat:
-        secondary_cat = _pick_best_categorical_col(
-            target_df, ["Automated", "Test Type", "Actual Result", "Type"],
-            exclude=[primary_cat] if primary_cat else [], allow_single_value=True,
-        )
 
     title_col = next(
-        (c for c in all_cols if any(k in c.lower() for k in ["title", "제목", "시나리오", "purpose", "description", "내용"])),
+        (c for c in all_cols if any(k in str(c).lower() for k in ["title", "test case", "name", "제목", "시나리오", "purpose", "description", "내용"])),
         None,
     )
 
+    focus_cut = defect_threshold if defect_threshold >= 5.0 else 20.0
+    cut_count_line = round(len(target_df) * (focus_cut / 100.0), 1)
+
     r1_c1, r1_c2 = st.columns(2)
 
-    # 차트 ①: 1순위 분류 가로형 TOP 순위 막대 차트 (Horizontal Ranking Bar)
     with r1_c1:
         vc1 = target_df[primary_cat].astype(str).value_counts().head(12).reset_index()
         vc1.columns = [primary_cat, "건수"]
         vc1["비중(%)"] = (vc1["건수"] / len(target_df) * 100).round(1)
-        vc1["표시라벨"] = vc1.apply(lambda r: f"{r['건수']:,}건 ({r['비중(%)']}%)", axis=1)
+        vc1["표시라벨"] = vc1.apply(
+            lambda r: f"{r['건수']:,}건 ({r['비중(%)']}%) {'🎯중점' if r['비중(%)'] >= focus_cut else ''}".strip(),
+            axis=1,
+        )
         vc1["짧은라벨"] = vc1[primary_cat].apply(lambda x: shorten_long_label(str(x), 24))
         vc1 = vc1.sort_values(by="건수", ascending=True)
 
         fig_c1 = px.bar(
             vc1, x="건수", y="짧은라벨", orientation="h", color="짧은라벨", text="표시라벨",
             color_discrete_sequence=DISTINCT_PALETTE,
-            title=f"① [{primary_cat}] TOP 순위별 건수 및 비중(%) 현황 (총 {len(target_df):,}건)",
+            title=f"① [{primary_cat}] TOP 순위 및 중점 기준({focus_cut:.0f}% = {cut_count_line}건) 비교",
+        )
+        fig_c1.add_vline(
+            x=cut_count_line, line_dash="dash", line_color="#DC2626",
+            annotation_text=f"중점 관리 기준 ({focus_cut:.0f}%)",
         )
         fig_c1.update_traces(textposition="outside", cliponaxis=False)
         fig_c1.update_layout(
             xaxis_title="데이터 건수 (건)", yaxis_title=primary_cat,
-            showlegend=False, margin=dict(l=20, r=70, t=48, b=25),
+            showlegend=False, margin=dict(l=20, r=85, t=48, b=25),
         )
         st.plotly_chart(fig_c1, use_container_width=True, key=f"{key_prefix}_cat1")
 
-    # 차트 ②: 2순위 핵심 속성(Domain / Automated / Test Type / 판정결과) 도넛 차트
     with r1_c2:
         vc2 = target_df[secondary_cat].astype(str).value_counts().head(10).reset_index()
         vc2.columns = [secondary_cat, "건수"]
@@ -375,7 +362,6 @@ def render_smart_charts(
 
     r2_c1, r2_c2 = st.columns(2)
 
-    # 차트 ③: 유사 제목(Title) / 시나리오 키워드 자동 그룹핑 가로 순위 차트
     with r2_c1:
         if title_col and target_df[title_col].nunique() > 1:
             topic_df = cluster_text_series_by_topic(target_df[title_col], max_groups=10)
@@ -395,12 +381,11 @@ def render_smart_charts(
                 )
                 st.plotly_chart(fig_c3, use_container_width=True, key=f"{key_prefix}_cat3")
 
-    # 차트 ④: [1순위 분류 × 2순위 분류] 교차 분석 막대 차트
     with r2_c2:
         third_cat = _pick_best_categorical_col(
             target_df,
-            ["Automated", "Test Type", "IP", "Sub System", "Domain", "PASS/FAIL"],
-            exclude=[primary_cat],
+            ["Priority", "Test Technique", "Automated", "Test Type", "IP", "Sub System", "Domain", "PASS/FAIL"],
+            exclude=[primary_cat] if primary_cat else [],
             allow_single_value=False,
         ) or secondary_cat
 
