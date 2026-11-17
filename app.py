@@ -94,6 +94,35 @@ if "pipeline_logs" not in st.session_state:
     st.session_state["pipeline_logs"] = []
 if "current_file_sig" not in st.session_state:
     st.session_state["current_file_sig"] = ""
+if "uploader_key" not in st.session_state:
+    st.session_state["uploader_key"] = 0
+
+
+def reset_all_inputs_and_files():
+    """업로드된 모든 파일과 입력 검색어, AI 분석 결과를 클릭 한 번으로 전부 초기화합니다."""
+    st.session_state["uploader_key"] += 1
+    st.session_state["saved_results"] = {}
+    st.session_state["last_analyzed_df"] = None
+    st.session_state["last_aux_sheets"] = {}
+    st.session_state["pipeline_logs"] = []
+    st.session_state["current_file_sig"] = ""
+    for k in ["nl_q_input", "kw_q_input"]:
+        if k in st.session_state:
+            st.session_state[k] = ""
+
+
+def get_file_type_badge(filename: str) -> tuple[str, str]:
+    """파일 확장자에 따라 (분류 그룹명, 아이콘 배지)를 반환합니다."""
+    ext = Path(filename).suffix.lower()
+    if ext == ".xlsx":
+        return "📊 엑셀 (.xlsx)", f"📊 [Excel] {filename}"
+    if ext == ".csv":
+        return "📈 CSV (.csv)", f"📈 [CSV] {filename}"
+    if ext == ".docx":
+        return "📄 워드 (.docx)", f"📄 [Word] {filename}"
+    if ext == ".txt":
+        return "📝 텍스트 (.txt)", f"📝 [TXT] {filename}"
+    return "📁 기타 파일", f"📁 {filename}"
 
 
 def build_pipeline_status_html(
@@ -161,7 +190,7 @@ def style_dataframe_with_colors(df: pd.DataFrame):
         s = str(val)
         if "빨강" in s or "🔴" in s or "FAIL" in s.upper() or "확인 필요" in s:
             return "background-color: #FEE2E2; color: #991B1B; font-weight: bold;"
-        if "초록" in s or "🟢" in s or "기준(" in s and "이상 비중" in s:
+        if "초록" in s or "🟢" in s or ("기준(" in s and "이상 비중" in s):
             return "background-color: #DCFCE7; color: #166534; font-weight: bold;"
         if "노랑" in s or "주황" in s or "🟡" in s or "🟠" in s:
             return "background-color: #FEF9C3; color: #854D0E; font-weight: bold;"
@@ -279,6 +308,9 @@ def generate_smart_assistant_question(
     if user_filter_text and user_filter_text.strip():
         scope_parts.append(f"검색조건('{user_filter_text.strip()}')")
 
+    if "파일명" in all_cols:
+        files = target_df["파일명"].unique().tolist()
+        scope_parts.append(f"통합 파일 {len(files)}개({', '.join(map(str, files[:3]))})")
     if "시트명" in all_cols:
         sheets = target_df["시트명"].unique().tolist()
         scope_parts.append(f"대상 시트 {len(sheets)}개({', '.join(map(str, sheets[:3]))})")
@@ -522,7 +554,15 @@ def render_agent_analysis_section(
 
     render_related_links_box(target_df)
 
-    if st.button("🚀 에이전트 정밀 분석 실행 (선택 모델 동시 병렬 실행)", type="primary"):
+    btn_c1, btn_c2 = st.columns([3, 1])
+    with btn_c1:
+        run_clicked = st.button("🚀 에이전트 정밀 분석 실행 (선택 모델 동시 병렬 실행)", type="primary", use_container_width=True)
+    with btn_c2:
+        if st.button("🔄 업로드 파일 & 입력 전체 초기화", key="reset_btn_bottom", use_container_width=True):
+            reset_all_inputs_and_files()
+            st.rerun()
+
+    if run_clicked:
         if not selected_models:
             st.warning("좌측 사이드바에서 최소 1개 이상의 모델을 선택해주세요.")
         else:
@@ -608,7 +648,7 @@ def render_agent_analysis_section(
                     )
 
             logs.append(f"**[4단계 완료]** 사내 기준(`{defect_threshold}%`) 자동 판정 배너 적용 및 환각 방지 정제 완료")
-            logs.append("**[5단계 완료]** 통합 엑셀(`.xlsx`) 및 워드(`.docx`) 보고서 패키징 완료")
+            logs.append("**[5단계 완료]** 통합 엑셀(`.xlsx`) 및 페이지 분리형 워드(`.docx`) 보고서 패키징 완료")
             status_box.update(label="🎉 1~5단계 전 파이프라인 가동 및 정밀 분석 완료!", state="complete", expanded=False)
 
             st.session_state["saved_results"] = new_results
@@ -645,7 +685,7 @@ def render_agent_analysis_section(
 
         top_c1, top_c2, top_c3 = st.columns([1.6, 1.2, 1.2])
         with top_c1:
-            st.caption("👆 **각 모델의 제목 버튼을 클릭하면 상세 시각화 팝업창이 열리며, 우측에서 엑셀(.xlsx)과 워드(.docx)를 모두 내려받을 수 있습니다.**")
+            st.caption("👆 **우측 워드(.docx) 추출 시 [1페이지: 전체 종합 요약표] + [2페이지~: AI별 강제 쪽 나누기 상세본]으로 출력됩니다.**")
         with top_c2:
             st.download_button(
                 label="📚 전체 모델 종합 비교 엑셀 추출 (.xlsx)",
@@ -658,7 +698,7 @@ def render_agent_analysis_section(
             )
         with top_c3:
             st.download_button(
-                label="📄 전체 모델 종합 비교 워드 추출 (.docx)",
+                label="📄 전체 모델 종합 워드 추출 (쪽나누기 적용 .docx)",
                 data=combined_docx_bytes,
                 file_name="report_ALL_models_combined.docx",
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -677,7 +717,6 @@ def render_agent_analysis_section(
                     f"🕒 분석 일시: **{res_item.get('analyzed_at', '-')}** | "
                     f"⏱️ 소요 시간: **{res_item['elapsed_time']}초**"
                 )
-                # 슬라이더를 변경했을 때 상단 배너도 최신 threshold 기준으로 즉시 표시
                 updated_report = re.sub(
                     r"^>\s*\*\*.*?\*\*\n\n",
                     f"> **{live_verdict}**\n\n",
@@ -716,13 +755,21 @@ def render_agent_analysis_section(
 
 
 # =====================================================================
-# 📂 파일 업로드 (단일 및 다중 파일 동시 첨부 + 서로 다른 파일 오염 방지 지원)
+# 📂 파일 업로드 & 원클릭 일괄 초기화 + 확장자별 분류 묶음 UI
 # =====================================================================
-uploaded_files = st.file_uploader(
-    "📂 사내 데이터·문서 파일(CSV, Excel, Word .docx, TXT) 업로드 (여러 파일 첨부 및 개별/통합 선택 가능)",
-    type=["csv", "xlsx", "docx", "txt"],
-    accept_multiple_files=True,
-)
+up_col1, up_col2 = st.columns([4, 1])
+with up_col1:
+    uploaded_files = st.file_uploader(
+        "📂 사내 데이터·문서 파일(CSV, Excel, Word .docx, TXT) 업로드 (다중 첨부 · 확장자별 분류 · 동시 분석 지원)",
+        type=["csv", "xlsx", "docx", "txt"],
+        accept_multiple_files=True,
+        key=f"file_uploader_{st.session_state['uploader_key']}",
+    )
+with up_col2:
+    st.markdown("<div style='margin-top:28px;'></div>", unsafe_allow_html=True)
+    if st.button("🔄 업로드 파일·입력 전체 초기화", key="top_reset_all_btn", use_container_width=True):
+        reset_all_inputs_and_files()
+        st.rerun()
 
 raw_df = pd.DataFrame()
 aux_sheets = {}
@@ -731,45 +778,97 @@ sheet_counts = {}
 active_file_name = ""
 
 if uploaded_files:
+    # 1. 확장자(유형)별로 업로드된 파일들을 자동 분류하여 묶어서 표시
+    grouped_files: dict[str, list] = {}
+    file_badge_map: dict[str, str] = {}
+    for f_obj in uploaded_files:
+        cat_label, badge_name = get_file_type_badge(f_obj.name)
+        grouped_files.setdefault(cat_label, []).append(f_obj)
+        file_badge_map[f_obj.name] = badge_name
+
     if len(uploaded_files) == 1:
         target_upload = uploaded_files[0]
         active_file_name = target_upload.name
+        st.caption(f"✅ 선택된 파일: **{file_badge_map[target_upload.name]}**")
     else:
-        file_options = [f.name for f in uploaded_files]
-        st.info(f"🗂️ **총 {len(uploaded_files)}개 파일이 첨부되었습니다.** 서로 다른 양식의 파일이 섞여 분석이 왜곡되지 않도록 분석할 대상 파일을 선택하거나 동일 양식일 때만 통합 조회하세요.")
-        chosen_file_mode = st.radio(
-            "분석할 첨부 파일 선택:",
-            options=file_options + ["📚 동일 양식 파일 전체 병합 조회"],
-            index=0,
-            horizontal=True,
-        )
-        if chosen_file_mode == "📚 동일 양식 파일 전체 병합 조회":
-            merged_dfs = []
-            merged_aux = {}
-            base_cols = None
-            schema_mismatch = False
-            for f_obj in uploaded_files:
-                f_df, _, _, f_aux = load_and_sync_to_db(f_obj, selected_sheet="ALL")
-                if len(f_df) > 0:
-                    cur_cols = set(f_df.columns) - {"시트명", "파일명"}
-                    if base_cols is None:
-                        base_cols = cur_cols
-                    elif base_cols != cur_cols:
-                        schema_mismatch = True
-                    f_copy = f_df.copy()
-                    f_copy.insert(0, "파일명", f_obj.name)
-                    merged_dfs.append(f_copy)
-                for k, v in f_aux.items():
-                    merged_aux[f"{f_obj.name}_{k}"] = v
-            if schema_mismatch:
-                st.warning("⚠️ 첨부된 파일들의 컬럼 구조가 서로 다릅니다(관련 없는 파일 혼합). 정확한 통계를 위해 위 라디오 버튼에서 개별 파일을 선택해 분석하는 것을 권장합니다.")
-            raw_df = pd.concat(merged_dfs, ignore_index=True) if merged_dfs else pd.DataFrame()
-            aux_sheets = merged_aux
-            active_file_name = "ALL_FILES"
-            target_upload = None
-        else:
-            target_upload = next(f for f in uploaded_files if f.name == chosen_file_mode)
-            active_file_name = target_upload.name
+        # 확장자 분류별 묶음 현황 배너 출력
+        group_summary_parts = [
+            f"**{cat_name}** `{len(f_list)}개` ({', '.join(f.name for f in f_list)})"
+            for cat_name, f_list in grouped_files.items()
+        ]
+        st.info("🗂️ **업로드 파일 확장자(유형)별 자동 분류 현황:**\n- " + "\n- ".join(group_summary_parts))
+
+        sel_c1, sel_c2 = st.columns([1.3, 2.7])
+        with sel_c1:
+            cat_filter_options = ["전체 유형 보기"] + list(grouped_files.keys())
+            chosen_cat_filter = st.selectbox(
+                "📂 1단계: 파일 분류(확장자) 필터",
+                options=cat_filter_options,
+                index=0,
+            )
+            filtered_upload_list = (
+                uploaded_files
+                if chosen_cat_filter == "전체 유형 보기"
+                else grouped_files.get(chosen_cat_filter, uploaded_files)
+            )
+            analysis_scope_mode = st.radio(
+                "🔍 2단계: 분석 방식 선택",
+                options=[
+                    "📄 개별 파일 1개 선택 분석",
+                    "📚 동시(2개 이상) 파일 선택 통합 분석",
+                ],
+                index=0,
+            )
+
+        with sel_c2:
+            filtered_names = [f.name for f in filtered_upload_list]
+            if analysis_scope_mode.startswith("📄"):
+                chosen_single_name = st.radio(
+                    "분석할 파일을 선택하세요 (확장자 배지 표시):",
+                    options=filtered_names,
+                    format_func=lambda x: file_badge_map.get(x, x),
+                    horizontal=True,
+                )
+                target_upload = next(f for f in uploaded_files if f.name == chosen_single_name)
+                active_file_name = target_upload.name
+            else:
+                chosen_multi_names = st.multiselect(
+                    "동시에 통합 분석할 파일들을 선택하세요 (2개 이상 선택 가능):",
+                    options=filtered_names,
+                    default=filtered_names,
+                    format_func=lambda x: file_badge_map.get(x, x),
+                )
+                target_upload = None
+                if not chosen_multi_names:
+                    st.warning("최소 1개 이상의 파일을 선택해 주세요.")
+                else:
+                    merged_dfs = []
+                    merged_aux = {}
+                    base_cols = None
+                    schema_mismatch = False
+                    for fname in chosen_multi_names:
+                        f_obj = next(f for f in uploaded_files if f.name == fname)
+                        f_df, _, _, f_aux = load_and_sync_to_db(f_obj, selected_sheet="ALL")
+                        if len(f_df) > 0:
+                            cur_cols = set(f_df.columns) - {"시트명", "파일명"}
+                            if base_cols is None:
+                                base_cols = cur_cols
+                            elif base_cols != cur_cols:
+                                schema_mismatch = True
+                            f_copy = f_df.copy()
+                            f_copy.insert(0, "파일명", file_badge_map.get(fname, fname))
+                            merged_dfs.append(f_copy)
+                        for k, v in f_aux.items():
+                            merged_aux[f"{fname}_{k}"] = v
+                    if schema_mismatch and len(chosen_multi_names) > 1:
+                        st.caption("💡 서로 다른 컬럼 구조의 파일들이 함께 선택되어 '파일명' 기준으로 통합 병합되었습니다.")
+                    raw_df = pd.concat(merged_dfs, ignore_index=True) if merged_dfs else pd.DataFrame()
+                    if len(raw_df) > 0:
+                        import sqlite3
+                        with sqlite3.connect(DB_PATH) as conn:
+                            raw_df.to_sql(TABLE_NAME, conn, if_exists="replace", index=False)
+                    aux_sheets = merged_aux
+                    active_file_name = "MULTI_" + "_".join(chosen_multi_names)
 
     if target_upload is not None:
         raw_df_all, sheet_names, sheet_counts, aux_sheets = load_and_sync_to_db(target_upload, selected_sheet="ALL")
@@ -777,7 +876,7 @@ if uploaded_files:
 
         if len(sheet_names) > 1:
             sheet_summary = " | ".join(f"**{s}**: {cnt}건" for s, cnt in sheet_counts.items())
-            st.info(f"📑 **다중 시트/표 감지 (총 {len(sheet_names)}개 시트, 메인 분석 대상 {len(raw_df_all):,}건):** {sheet_summary}")
+            st.info(f"📑 **[{file_badge_map.get(target_upload.name, target_upload.name)}] 다중 시트/표 감지 (총 {len(sheet_names)}개 시트, 메인 {len(raw_df_all):,}건):** {sheet_summary}")
             sheet_options = ["ALL"] + sheet_names
             chosen_sheet = st.radio(
                 "조회할 시트 범위 선택:",
@@ -802,10 +901,21 @@ if uploaded_files:
 
 
 # =====================================================================
-# ⚙️ 사이드바 설정 (1.5% vs 10.0% 차이가 즉시 반영되는 사내 품질 기준값 슬라이더)
+# ⚙️ 사이드바 설정 (상시 노출되는 초기화 버튼 포함)
 # =====================================================================
 with st.sidebar:
     st.header("⚙️ 실행 및 비교 모델 설정")
+    if st.button("🔄 업로드 파일 & 전체 입력 초기화", key="sidebar_reset_all", type="primary", use_container_width=True):
+        reset_all_inputs_and_files()
+        st.rerun()
+
+    if st.session_state["saved_results"]:
+        if st.button("🗑️ AI 분석 결과만 초기화 (파일 유지)", key="sidebar_reset_res", use_container_width=True):
+            st.session_state["saved_results"] = {}
+            st.session_state["pipeline_logs"] = []
+            st.rerun()
+
+    st.divider()
     run_type = st.radio("실행 방식 선택", options=["다중 모델 동시 비교 (PoC)", "단일 모델 실행"], index=0)
 
     if run_type == "단일 모델 실행":
@@ -832,15 +942,8 @@ with st.sidebar:
     )
     st.caption(
         f"현재 기준: **{defect_threshold}%** "
-        f"(바꾸면 상단 판정 배너·통계표·엑셀 `자동 판정 요약`이 즉시 **{defect_threshold}%** 기준으로 변경됩니다)"
+        f"(바꾸면 상단 판정 배너·통계표·엑셀/워드 `자동 판정 요약`이 즉시 **{defect_threshold}%** 기준으로 변경됩니다)"
     )
-
-    with st.expander("❓ [발표 Q&A] 1.5%와 10.0%가 어떻게 다른가요?", expanded=False):
-        st.markdown(
-            "- **제조 데이터:** 불량률이 **1.5%**를 넘는지 vs **10.0%**를 넘는지 비교해 `🚨 [확인 필요]` 라인을 판정합니다.\n"
-            "- **TC/문서 데이터:** 각 컬럼의 **미기입(빈칸/N/A) 비율**이 기준값을 초과하는지, 그리고 각 분류 항목의 비중이 기준값 이상인지 판정합니다.\n"
-            "- **엑셀·워드 연동:** 설정한 기준값 숫자(`1.5%`, `10.0%` 등)가 엑셀 `자동 판정 요약` 칸에 그대로 기록됩니다."
-        )
 
     st.divider()
     ollama_models = get_installed_ollama_models()
@@ -848,19 +951,13 @@ with st.sidebar:
         chosen_ollama = st.selectbox("구동할 로컬 모델 변경", options=ollama_models, index=0)
         os.environ["LOCAL_MODEL_NAME"] = chosen_ollama
 
-    if st.session_state["saved_results"]:
-        if st.button("🗑️ 이전 분석 결과 초기화", use_container_width=True):
-            st.session_state["saved_results"] = {}
-            st.session_state["pipeline_logs"] = []
-            st.rerun()
-
 
 # =====================================================================
 # 📊 메인 워크플로우 화면 출력
 # =====================================================================
 pipeline_slot = st.empty()
 
-if not uploaded_files:
+if not uploaded_files or len(raw_df) == 0:
     pipeline_slot.markdown(
         build_pipeline_status_html(has_file=False, has_query_df=False, saved_results={}),
         unsafe_allow_html=True,
@@ -899,7 +996,7 @@ else:
             f"테이블(`{TABLE_NAME}`) 컬럼: `{list(raw_df.columns)}` | "
             "💡 **비워두거나 '전체조회' 입력 시 전체 건수(100% 전체 행)가 조회**되며, `'상위 50건'`, `'High만'` 등 조건 입력도 가능합니다."
         )
-        nl_question = st.text_input("조회 조건을 자연어로 입력하세요 (비워두면 제한 없이 전체 데이터를 조회합니다):", value="")
+        nl_question = st.text_input("조회 조건을 자연어로 입력하세요 (비워두면 제한 없이 전체 데이터를 조회합니다):", value="", key="nl_q_input")
         auto_sql = build_smart_sql(nl_question, raw_df, TABLE_NAME)
         st.code(auto_sql, language="sql")
         try:
@@ -914,7 +1011,7 @@ else:
 
     with tab_kw:
         c1, c2 = st.columns([3, 1])
-        kw_input = c1.text_input("검색 키워드 입력 (쉼표 `,` 구분, 예: `선물하기, High, 장바구니`)", value="")
+        kw_input = c1.text_input("검색 키워드 입력 (쉼표 `,` 구분, 예: `선물하기, High, 장바구니`)", value="", key="kw_q_input")
         match_type = c2.radio("조건", options=["OR (하나라도 포함)", "AND (모두 포함)"], horizontal=True)
         if kw_input.strip():
             df = filter_by_keywords(raw_df, kw_input, match_all=match_type.startswith("AND"))

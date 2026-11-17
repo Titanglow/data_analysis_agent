@@ -39,17 +39,13 @@ def shorten_long_label(text, max_len: int = 28) -> str:
 
 
 def evaluate_threshold_verdict(df: pd.DataFrame, threshold: float = 1.5) -> str:
-    """
-    사내 관리 기준값(threshold%)을 현재 데이터에 적용하여
-    1.5%일 때와 10.0%일 때 판정 결과가 명확히 달라지는 자동 판정 문구를 생성합니다.
-    """
+    """사내 관리 기준값(threshold%)을 현재 데이터에 적용하여 자동 판정 문구를 생성합니다."""
     if df is None or len(df) == 0:
         return f"✅ [기준({threshold}%) 판정] 조회된 데이터가 없습니다."
 
     all_cols = df.columns.tolist()
     total_cnt = len(df)
 
-    # 1) 제조/생산 데이터인 경우: 라인별 불량률(%)을 threshold%와 비교
     if "생산량" in all_cols and "불량수" in all_cols:
         line_col = "라인" if "라인" in all_cols else ("생산라인" if "생산라인" in all_cols else None)
         exceed_lines = []
@@ -74,13 +70,11 @@ def evaluate_threshold_verdict(df: pd.DataFrame, threshold: float = 1.5) -> str:
             f"모든 라인이 허용 기준({threshold}%) 이내입니다 (전체 평균 {avg_rate:.2f}%)"
         )
 
-    # 2) TC / 일반 문서 데이터인 경우:
-    # 컬럼별 미기입(빈칸)·미실행(Not Run/N/A)·실패(FAIL) 비율 및 중점 분류 비중을 threshold%와 직접 비교
     exceed_issues = []
     focus_groups = []
 
     for col in all_cols:
-        if str(col).lower() in ("_polarion", "id", "tc id", "tc_id", "번호", "시트명"):
+        if str(col).lower() in ("_polarion", "id", "tc id", "tc_id", "번호", "시트명", "파일명"):
             continue
         vals = [_clean_tag_str(v) for v in df[col].tolist()]
         empty_cnt = sum(1 for v in vals if v in ("-", "", "(빈칸)"))
@@ -94,7 +88,6 @@ def evaluate_threshold_verdict(df: pd.DataFrame, threshold: float = 1.5) -> str:
         if na_pct > threshold:
             exceed_issues.append(f"[{col}] 미실행/N/A/주의 {na_or_notrun_cnt}건({na_pct:.1f}%)")
 
-        # 주요 범주형 컬럼에서 비중이 threshold%를 넘는 집중 항목 파악
         valid_vals = [v for v in vals if v not in ("-", "", "N/A", "n/a")]
         if 2 <= len(set(valid_vals)) <= 15 and len(focus_groups) < 3:
             vc = pd.Series(valid_vals).value_counts()
@@ -268,10 +261,6 @@ def build_korean_stat_tables(
     aux_sheets: dict[str, pd.DataFrame] | None = None,
     threshold: float = 1.5,
 ) -> dict[str, pd.DataFrame]:
-    """
-    사내 기준값(threshold%)을 모든 표에 실제로 연동하여
-    1.5%로 설정했을 때와 10.0%로 설정했을 때 판정 열이 즉시 달라지도록 집계합니다.
-    """
     tables = {}
     if df is None or len(df) == 0:
         return tables
@@ -280,12 +269,10 @@ def build_korean_stat_tables(
     num_cols = df.select_dtypes(include=["number"]).columns.tolist()
     total_cnt = len(df)
 
-    # 1. 보조 시트 요약
     aux_df = summarize_aux_sheets(aux_sheets)
     if len(aux_df) > 0:
         tables["1. 보조 시트(Summary · Environment 등) 핵심 내용 통합 요약"] = aux_df
 
-    # 2. 전체 컬럼별 기재 현황 및 미기입률 사내 기준(threshold%) 판정표
     col_check_rows = []
     for col in all_cols:
         clean_list = [_clean_tag_str(v) for v in df[col].tolist()]
@@ -313,7 +300,6 @@ def build_korean_stat_tables(
         })
     tables[f"{len(tables) + 1}. 전체 컬럼별 데이터 작성 현황 및 기준({threshold}%) 판정"] = pd.DataFrame(col_check_rows)
 
-    # 3. 실행/판정 상태 정밀 집계
     status_cols = [
         c for c in all_cols
         if any(k in str(c).lower() for k in ["execution status", "status", "actual result", "pass/fail", "판정", "결과", "상태"])
@@ -345,12 +331,10 @@ def build_korean_stat_tables(
         if st_rows:
             tables[f"{len(tables) + 1}. 실행 및 판정 상태 정밀 집계"] = pd.DataFrame(st_rows)
 
-    # 4. 셀 배경색이 실제로 존재할 때만(>0건) 색상 문맥 표 추가
     color_ctx_df = analyze_color_cell_contexts(df)
     if len(color_ctx_df) > 0:
         tables[f"{len(tables) + 1}. 셀 배경색(강조 표시) 위치 및 문맥별 실제 의미 분석"] = color_ctx_df
 
-    # 5. 제조/생산 데이터 전용 집계 (사내 불량률 기준 threshold% 연동)
     line_col = "라인" if "라인" in all_cols else ("생산라인" if "생산라인" in all_cols else None)
     if line_col and "생산량" in all_cols and "불량수" in all_cols:
         line_rows = []
@@ -380,12 +364,11 @@ def build_korean_stat_tables(
         if line_rows:
             tables[f"{len(tables) + 1}. 라인별 생산·품질 및 사내 기준({threshold}%) 판정 집계"] = pd.DataFrame(line_rows)
 
-    # 6. 실제 존재하는 범주형 컬럼별 분포 및 사내 기준(threshold%) 집중도 판정
     meaningful_cats = []
     for c in all_cols:
         if c in status_cols or str(c).lower() in ("_polarion", "id", "tc id", "tc_id", "번호"):
             continue
-        if any(k in str(c).lower() for k in ["sub system", "domain", "category", "priority", "severity", "technique", "test type", "automated", "app", "ip", "불량유형", "시간대", "부서", "분류"]):
+        if any(k in str(c).lower() for k in ["파일명", "시트명", "sub system", "domain", "category", "priority", "severity", "technique", "test type", "automated", "app", "ip", "불량유형", "시간대", "부서", "분류"]):
             clean_vals = [v for v in (_clean_tag_str(x) for x in df[c].tolist()) if v != "-"]
             if len(set(clean_vals)) >= 2 or len(meaningful_cats) == 0:
                 meaningful_cats.append(c)
@@ -412,14 +395,12 @@ def build_korean_stat_tables(
         if c_rows:
             tables[f"{len(tables) + 1}. [{c_col}] 실제 항목별 분포 및 기준({threshold}%) 비교"] = pd.DataFrame(c_rows)
 
-    # 7. Title / 시나리오 주제 클러스터링 표
     title_col = next((c for c in all_cols if any(k in str(c).lower() for k in ["title", "test case", "name", "제목", "시나리오", "purpose"])), None)
     if title_col:
         topic_df = cluster_text_series_by_topic(df[title_col], max_groups=8)
         if not topic_df.empty:
             tables[f"{len(tables) + 1}. [{title_col}] 유사 시나리오·키워드 그룹핑 집계"] = topic_df
 
-    # 8. 수치형 기초통계
     if num_cols:
         stat_rows = []
         for col in num_cols:
@@ -610,7 +591,6 @@ def _write_stat_tables_to_sheet(
     sheet_name: str = "2_시트통합요약_및_핵심집계",
     threshold: float = 1.5,
 ):
-    """불필요한 엑셀 막대차트를 제거하고, 한글 통계 집계표만 깔끔하게 시트에 기록합니다."""
     tables = build_korean_stat_tables(df, aux_sheets=aux_sheets, threshold=threshold)
     ws = writer.book.create_sheet(title=sheet_name)
 
@@ -649,7 +629,6 @@ def export_analysis_to_excel(
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         parsed_secs = parse_report_into_sections(report_text)
-        # 중복 방지를 위해 기존 자동 기준 판정 요약은 제거하고 정확한 threshold 판정으로 고정
         filtered_secs = [s for s in parsed_secs if s["구분 항목"] != "자동 기준 판정 요약"]
 
         report_rows = [
@@ -681,10 +660,6 @@ def export_combined_analysis_to_excel(
     aux_sheets: dict[str, pd.DataFrame] | None = None,
     threshold: float = 1.5,
 ) -> bytes:
-    """
-    1_모델별_종합비교 시트에서 무의미한 소요시간 막대차트를 제거하고,
-    '분석 일시'와 정확한 '자동 기준(threshold%) 판정 요약'을 기록합니다.
-    """
     verdict_str = evaluate_threshold_verdict(df, threshold=threshold)
     output = io.BytesIO()
 
@@ -740,38 +715,67 @@ def export_combined_analysis_to_excel(
 
 
 # =====================================================================
-# 📄 순수 파이썬 MS Word (.docx) 보고서 생성기 (외부 패키지 불필요)
+# 📄 MS Word (.docx) 보고서 생성기 (첫 페이지 종합 요약표 + AI별 강제 쪽 나누기 지원!)
 # =====================================================================
-def _build_docx_bytes(title: str, subtitle_lines: list[str], sections: list[tuple[str, str]]) -> bytes:
-    """OpenXML 표준 구조로 MS Word에서 바로 열리는 깔끔한 .docx 바이너리를 생성합니다."""
-    def _p(text: str, bold: bool = False, size_half_pt: int = 21, color: str = "1F2937", space_after: int = 120) -> str:
-        t_esc = escape(str(text))
-        b_tag = "<w:b/>" if bold else ""
-        return (
-            f'<w:p><w:pPr><w:spacing w:after="{space_after}"/></w:pPr>'
-            f'<w:r><w:rPr><w:rFonts w:ascii="맑은 고딕" w:eastAsia="맑은 고딕" w:hAnsi="맑은 고딕"/>'
-            f'{b_tag}<w:color w:val="{color}"/><w:sz w:val="{size_half_pt}"/></w:rPr>'
-            f'<w:t xml:space="preserve">{t_esc}</w:t></w:r></w:p>'
+def _docx_p(text: str, bold: bool = False, size_half_pt: int = 21, color: str = "1F2937", space_after: int = 110) -> str:
+    t_esc = escape(str(text))
+    b_tag = "<w:b/>" if bold else ""
+    return (
+        f'<w:p><w:pPr><w:spacing w:after="{space_after}"/></w:pPr>'
+        f'<w:r><w:rPr><w:rFonts w:ascii="맑은 고딕" w:eastAsia="맑은 고딕" w:hAnsi="맑은 고딕"/>'
+        f'{b_tag}<w:color w:val="{color}"/><w:sz w:val="{size_half_pt}"/></w:rPr>'
+        f'<w:t xml:space="preserve">{t_esc}</w:t></w:r></w:p>'
+    )
+
+
+def _docx_page_break() -> str:
+    """강제 페이지 나누기(쪽 나누기) XML 태그: 여백이 남아도 무조건 다음 페이지 첫 줄에서 시작합니다."""
+    return '<w:p><w:r><w:br w:type="page"/></w:r></w:p>'
+
+
+def _docx_table(headers: list[str], rows: list[list[str]]) -> str:
+    """Word 문서 내부에 깔끔한 초록색 헤더 표(<w:tbl>)를 생성합니다."""
+    borders = (
+        '<w:tblBorders>'
+        '<w:top w:val="single" w:sz="6" w:space="0" w:color="9CA3AF"/>'
+        '<w:bottom w:val="single" w:sz="6" w:space="0" w:color="9CA3AF"/>'
+        '<w:left w:val="single" w:sz="6" w:space="0" w:color="9CA3AF"/>'
+        '<w:right w:val="single" w:sz="6" w:space="0" w:color="9CA3AF"/>'
+        '<w:insideH w:val="single" w:sz="4" w:space="0" w:color="D1D5DB"/>'
+        '<w:insideV w:val="single" w:sz="4" w:space="0" w:color="D1D5DB"/>'
+        '</w:tblBorders>'
+    )
+    tbl_xml = [f'<w:tbl><w:tblPr><w:tblW w:w="5000" w:type="pct"/>{borders}</w:tblPr>']
+
+    # 헤더 행 (초록 배경 #059669 + 흰색 볼드 글씨)
+    h_cells = []
+    for h in headers:
+        h_cells.append(
+            '<w:tc><w:tcPr><w:shd w:val="clear" w:color="auto" w:fill="059669"/></w:tcPr>'
+            f'{_docx_p(h, bold=True, size_half_pt=19, color="FFFFFF", space_after=60)}</w:tc>'
         )
+    tbl_xml.append(f'<w:tr>{"".join(h_cells)}</w:tr>')
 
-    body_xml = [_p(title, bold=True, size_half_pt=32, color="059669", space_after=180)]
-    for sub in subtitle_lines:
-        body_xml.append(_p(sub, bold=True, size_half_pt=20, color="374151", space_after=80))
+    # 데이터 행
+    for r in rows:
+        r_cells = []
+        for idx, cell_val in enumerate(r):
+            bg = "F9FAFB" if idx == 0 else "FFFFFF"
+            is_b = idx == 0
+            lines = [l.strip() for l in str(cell_val).splitlines() if l.strip()] or ["-"]
+            p_tags = "".join(_docx_p(l, bold=is_b, size_half_pt=18, color="111827", space_after=50) for l in lines)
+            r_cells.append(f'<w:tc><w:tcPr><w:shd w:val="clear" w:color="auto" w:fill="{bg}"/></w:tcPr>{p_tags}</w:tc>')
+        tbl_xml.append(f'<w:tr>{"".join(r_cells)}</w:tr>')
 
-    body_xml.append(_p("─" * 52, bold=False, size_half_pt=18, color="D1D5DB", space_after=160))
+    tbl_xml.append('</w:tbl>')
+    return "".join(tbl_xml)
 
-    for sec_title, sec_body in sections:
-        body_xml.append(_p(f"■ {sec_title}", bold=True, size_half_pt=24, color="047857", space_after=100))
-        for line in str(sec_body).splitlines():
-            clean_l = line.strip()
-            if clean_l:
-                body_xml.append(_p(f"  {clean_l}", bold=False, size_half_pt=20, color="111827", space_after=80))
-        body_xml.append(_p("", space_after=80))
 
+def _pack_docx_xml(body_elements: list[str]) -> bytes:
     document_xml = (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
         '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
-        f'<w:body>{"".join(body_xml)}<w:sectPr/></w:body></w:document>'
+        f'<w:body>{"".join(body_elements)}<w:sectPr/></w:body></w:document>'
     )
     content_types_xml = (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
@@ -806,18 +810,34 @@ def export_analysis_to_docx(
 ) -> bytes:
     analyzed_at = analyzed_at or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     verdict_str = evaluate_threshold_verdict(df, threshold=threshold)
-    subtitles = [
-        f"• 분석 일시: {analyzed_at}",
-        f"• 분석 AI 모델: {mode} (소요 시간: {elapsed_time}초)",
-        f"• 분석 대상 데이터: 총 {len(df):,}건 (사내 관리 기준값: {threshold}%)",
-        f"• 자동 기준 판정 요약: {verdict_str}",
+
+    body = [
+        _docx_p("📊 사내 데이터 AI 정밀 분석 보고서", bold=True, size_half_pt=32, color="059669", space_after=160),
+        _docx_table(
+            ["항목", "상세 내용"],
+            [
+                ["분석 일시", analyzed_at],
+                ["분석 AI 엔진", f"{mode} (소요 시간: {elapsed_time}초)"],
+                ["분석 대상 건수", f"총 {len(df):,}건 (사내 관리 기준값: {threshold}%)"],
+                [f"자동 기준({threshold}%) 판정", verdict_str],
+            ],
+        ),
+        _docx_p("", space_after=140),
     ]
+
     parsed = [
-        (s["구분 항목"], s["상세 분석 내용"])
-        for s in parse_report_into_sections(report_text)
+        s for s in parse_report_into_sections(report_text)
         if s["구분 항목"] != "자동 기준 판정 요약"
     ]
-    return _build_docx_bytes("📊 사내 데이터 AI 정밀 분석 보고서", subtitles, parsed)
+    for sec in parsed:
+        body.append(_docx_p(f"■ {sec['구분 항목']}", bold=True, size_half_pt=24, color="047857", space_after=90))
+        for line in str(sec["상세 분석 내용"]).splitlines():
+            clean_l = line.strip()
+            if clean_l:
+                body.append(_docx_p(f"  {clean_l}", bold=False, size_half_pt=20, color="111827", space_after=70))
+        body.append(_docx_p("", space_after=80))
+
+    return _pack_docx_xml(body)
 
 
 def export_combined_analysis_to_docx(
@@ -826,27 +846,117 @@ def export_combined_analysis_to_docx(
     model_labels: dict[str, str],
     threshold: float = 1.5,
 ) -> bytes:
+    """
+    [ALL 분석 리포트 워드 문서 (.docx) 구조]
+    - 1페이지 (첫 페이지): 전체 분석 보고서 종합 요약본 (메타데이터 표 + AI 모델별 핵심 진단 비교 요약표)
+    - 2페이지부터 (다음 페이지~): 강제 페이지 나누기(<w:br w:type="page"/>)를 적용하여
+      각 AI(API)별 상세 분석 리포트가 무조건 새 페이지 첫 줄에서 시작하도록 구성!
+    """
     verdict_str = evaluate_threshold_verdict(df, threshold=threshold)
     first_time = next(
         (r.get("analyzed_at") for r in saved_results.values() if r.get("analyzed_at")),
         datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     )
-    subtitles = [
-        f"• 분석 일시: {first_time}",
-        f"• 비교 AI 모델 수: {len(saved_results)}개 모델 동시 비교",
-        f"• 분석 대상 데이터: 총 {len(df):,}건 (사내 관리 기준값: {threshold}%)",
-        f"• 자동 기준 판정 요약: {verdict_str}",
+    model_names_str = ", ".join(model_labels.get(m, m) for m in saved_results.keys())
+
+    # =========================================================================
+    # [첫 페이지] 전체 분석 보고서 종합 요약본 (Executive Summary)
+    # =========================================================================
+    body = [
+        _docx_p("📚 다중 AI 모델 종합 비교 분석 보고서", bold=True, size_half_pt=34, color="059669", space_after=140),
+        _docx_p("■ [1페이지] 전체 분석 보고서 종합 요약본 (Executive Summary)", bold=True, size_half_pt=24, color="047857", space_after=100),
+        _docx_table(
+            ["종합 요약 항목", "상세 내용"],
+            [
+                ["분석 일시", first_time],
+                ["비교 분석 AI 모델", f"총 {len(saved_results)}개 모델 ({model_names_str})"],
+                ["분석 대상 데이터", f"총 {len(df):,}건 (사내 관리 기준값: {threshold}% 적용)"],
+                [f"사내 기준({threshold}%) 판정", verdict_str],
+            ],
+        ),
+        _docx_p("", space_after=120),
+        _docx_p("■ AI 모델별 핵심 진단 및 실무 조치 한눈에 비교", bold=True, size_half_pt=23, color="047857", space_after=90),
     ]
-    sections = []
+
+    summary_table_rows = []
     for m_code, res in saved_results.items():
+        m_title = model_labels.get(m_code, m_code)
+        el_str = f"{res.get('elapsed_time', 0.0)}초"
+        sections = parse_report_into_sections(res.get("report", ""))
+        sec_map = {s["구분 항목"]: s["상세 분석 내용"] for s in sections}
+
+        s1 = next((v for k, v in sec_map.items() if "1." in k or "요약" in k or "현황" in k or "추세" in k), "")
+        s2 = next((v for k, v in sec_map.items() if "2." in k or "분포" in k or "이상" in k), "")
+        s4 = next((v for k, v in sec_map.items() if "4." in k or "조치" in k), "")
+
+        def _first_2_lines(txt: str) -> str:
+            lines = [l.strip() for l in str(txt).splitlines() if l.strip()]
+            return "\n".join(lines[:2]) if lines else "상세 페이지 참조"
+
+        summary_table_rows.append([
+            f"{m_title}\n({el_str})",
+            _first_2_lines(s1),
+            _first_2_lines(s2),
+            _first_2_lines(s4),
+        ])
+
+    body.append(
+        _docx_table(
+            ["AI 모델 (소요시간)", "1. 핵심 현황 요약", "2. 주요 분포 진단", "4. 핵심 조치 제안"],
+            summary_table_rows,
+        )
+    )
+    body.append(_docx_p("", space_after=80))
+    body.append(
+        _docx_p(
+            "※ 다음 페이지(2페이지~)부터는 각 AI 모델별로 분석한 상세 리포트 전문이 페이지별로 분리되어 기재됩니다.",
+            bold=True,
+            size_half_pt=19,
+            color="2563EB",
+            space_after=80,
+        )
+    )
+
+    # =========================================================================
+    # [다음 페이지부터] 각 AI(API)별 상세 리포트 (무조건 강제 쪽 나누기 적용!)
+    # =========================================================================
+    for idx, (m_code, res) in enumerate(saved_results.items(), start=2):
+        # 여백이 남아 있어도 무조건 강제로 다음 페이지에서 시작!
+        body.append(_docx_page_break())
+
         m_name = model_labels.get(m_code, m_code)
         el = res.get("elapsed_time", 0.0)
-        body_lines = []
+        m_time = res.get("analyzed_at") or first_time
+
+        body.append(
+            _docx_p(
+                f"📊 [{idx}페이지~] {m_name} — 개별 상세 분석 리포트",
+                bold=True,
+                size_half_pt=30,
+                color="059669",
+                space_after=120,
+            )
+        )
+        body.append(
+            _docx_table(
+                ["모델 정보 항목", "내용"],
+                [
+                    ["구동 AI 모델", m_name],
+                    ["분석 일시 / 소요 시간", f"{m_time}  (총 {el}초 소요)"],
+                    [f"자동 기준({threshold}%) 판정 요약", verdict_str],
+                ],
+            )
+        )
+        body.append(_docx_p("", space_after=120))
+
         for s in parse_report_into_sections(res.get("report", "")):
             if s["구분 항목"] == "자동 기준 판정 요약":
                 continue
-            body_lines.append(f"[{s['구분 항목']}]")
-            body_lines.append(s["상세 분석 내용"])
-            body_lines.append("")
-        sections.append((f"{m_name} (소요 시간: {el}초)", "\n".join(body_lines)))
-    return _build_docx_bytes("📚 다중 AI 모델 종합 비교 분석 보고서", subtitles, sections)
+            body.append(_docx_p(f"■ {s['구분 항목']}", bold=True, size_half_pt=23, color="047857", space_after=90))
+            for line in str(s["상세 분석 내용"]).splitlines():
+                clean_l = line.strip()
+                if clean_l:
+                    body.append(_docx_p(f"  {clean_l}", bold=False, size_half_pt=20, color="111827", space_after=70))
+            body.append(_docx_p("", space_after=90))
+
+    return _pack_docx_xml(body)
