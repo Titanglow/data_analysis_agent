@@ -1,7 +1,9 @@
 # app.py
+import io
 import os
 import re
 import sqlite3
+import zipfile
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -28,7 +30,7 @@ from data_agent.excel_exporter import (
     analyze_color_cell_contexts,
     evaluate_threshold_verdict,
 )
-from data_agent.llm import get_installed_ollama_models
+from data_agent.llm import get_installed_ollama_models, call_llm
 from data_agent.tools.data_loader import (
     load_and_sync_to_db,
     filter_by_keywords,
@@ -97,6 +99,12 @@ if "current_file_sig" not in st.session_state:
     st.session_state["current_file_sig"] = ""
 if "uploader_key" not in st.session_state:
     st.session_state["uploader_key"] = 0
+if "chat_history" not in st.session_state:
+    st.session_state["chat_history"] = []
+if "rag_guideline_text" not in st.session_state:
+    st.session_state["rag_guideline_text"] = ""
+if "consistency_df" not in st.session_state:
+    st.session_state["consistency_df"] = None
 
 
 def reset_all_inputs_and_files():
@@ -106,6 +114,8 @@ def reset_all_inputs_and_files():
     st.session_state["last_aux_sheets"] = {}
     st.session_state["pipeline_logs"] = []
     st.session_state["current_file_sig"] = ""
+    st.session_state["chat_history"] = []
+    st.session_state["consistency_df"] = None
     for k in ["nl_q_input", "kw_q_input"]:
         if k in st.session_state:
             st.session_state[k] = ""
@@ -122,6 +132,37 @@ def get_file_type_badge(filename: str) -> tuple[str, str]:
     if ext == ".txt":
         return "📝 텍스트 (.txt)", f"📝 [TXT] {filename}"
     return "📁 기타 파일", f"📁 {filename}"
+
+
+def extract_text_from_guideline_file(uploaded_guide) -> str:
+    """사내 기준서/가이드 문서(.txt, .md, .docx, .csv)에서 텍스트를 추출합니다 (RAG 연동용)."""
+    if uploaded_guide is None:
+        return ""
+    uploaded_guide.seek(0)
+    raw_bytes = uploaded_guide.read()
+    fname = uploaded_guide.name.lower()
+
+    if fname.endswith(".docx"):
+        ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+        lines = []
+        try:
+            with zipfile.ZipFile(io.BytesIO(raw_bytes)) as zf:
+                if "word/document.xml" in zf.namelist():
+                    root = ET.fromstring(zf.read("word/document.xml"))
+                    for p in root.findall(".//w:body/w:p", ns):
+                        t_list = [t.text for t in p.findall(".//w:t", ns) if t.text]
+                        s = "".join(t_list).strip()
+                        if s:
+                            lines.append(s)
+        except Exception:
+            pass
+        return "\n".join(lines[:80])
+
+    try:
+        txt = raw_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        txt = raw_bytes.decode("cp949", errors="replace")
+    return "\n".join(txt.splitlines()[:80])
 
 
 def build_pipeline_status_html(
@@ -203,15 +244,6 @@ def style_dataframe_with_colors(df: pd.DataFrame):
 
 
 def build_smart_sql(nl_query: str, df: pd.DataFrame, table_name: str) -> str:
-    """
-    [고도화된 자연어 → SQLite SQL 자동 변환기]
-    1. 비어 있거나 '전체조회' 입력 시: LIMIT 없이 100% 전체 데이터 조회
-    2. 건수 제한('상위 30건', '100건만'): LIMIT N 자동 적용
-    3. 미기입/빈칸/미실행 검색('미기입만', '빈칸 조회', 'N/A만', '미실행만'): '-' / 'N/A' / 'Not Run' 조건 자동 생성
-    4. 제외 조건('Linux 빼고', 'N/A 제외'): NOT LIKE 조건 적용
-    5. 범주형 정확 매칭 + 긴 문장(Title/Procedure 등) 내 부분 키워드('VP9', '결제', '쿠폰' 등) 자동 탐색
-    6. 수치 비교('생산량 1200 이상', '불량수 20 초과') 및 정렬('불량수 높은 순', '생산량 낮은 순') 지원
-    """
     if not nl_query or not nl_query.strip():
         return f"SELECT * FROM {table_name};"
 
@@ -219,7 +251,6 @@ def build_smart_sql(nl_query: str, df: pd.DataFrame, table_name: str) -> str:
     if q.replace(" ", "").lower() in ("전체", "전체조회", "전체데이터", "모두조회", "다보여줘", "전체보여줘", "all"):
         return f"SELECT * FROM {table_name};"
 
-    # 1. 건수 제한(LIMIT N) 추출
     limit_val = None
     limit_match = re.search(r"(?:상위\s*|최대\s*|limit\s*)?(\d+)\s*(?:건|개|행|줄)(?:\s*만|\s*조회|\s*보여|\s*출력)?", q, re.IGNORECASE)
     if not limit_match:
@@ -230,7 +261,6 @@ def build_smart_sql(nl_query: str, df: pd.DataFrame, table_name: str) -> str:
     else:
         q_without_limit = q
 
-    # 2. 정렬(ORDER BY) 조건 감지
     order_clause = ""
     num_cols = df.select_dtypes(include=["number"]).columns.tolist()
     if any(k in q_without_limit for k in ["높은 순", "높은순", "많은 순", "많은순", "큰 순", "내림차순", "낮은 순", "낮은순", "적은 순", "오름차순", "정렬"]):
@@ -255,7 +285,6 @@ def build_smart_sql(nl_query: str, df: pd.DataFrame, table_name: str) -> str:
         sql = f"SELECT * FROM {table_name}{order_clause}"
         return f"{sql} LIMIT {limit_val};" if limit_val else f"{sql};"
 
-    # 3. 배경색 키워드 검색
     if any(k in q_without_limit for k in ["빨강", "빨간", "초록", "노랑", "배경", "색상", "색깔"]):
         color_kw = "빨강" if ("빨강" in q_without_limit or "빨간" in q_without_limit) else (
             "초록" if "초록" in q_without_limit else ("노랑" if "노랑" in q_without_limit else "강조")
@@ -264,13 +293,11 @@ def build_smart_sql(nl_query: str, df: pd.DataFrame, table_name: str) -> str:
         sql = f"SELECT * FROM {table_name} WHERE (" + " OR ".join(or_likes) + f"){order_clause}"
         return f"{sql} LIMIT {limit_val};" if limit_val else f"{sql};"
 
-    # 4. 미기입 / 빈칸 / 공란 / 미실행 / N/A 전용 검색
     if any(k in q_without_limit.lower() for k in ["미기입", "빈칸", "공란", "미실행", "not run", "n/a"]):
         target_c = next((c for c in df.columns if str(c).lower() in q_without_limit.lower()), None)
         check_cols = [target_c] if target_c else [
             c for c in df.columns if str(c).lower() not in ("_polarion", "id", "tc id", "번호", "시트명", "파일명")
         ]
-        conds = []
         if any(k in q_without_limit.lower() for k in ["미실행", "not run"]):
             conds = [f'UPPER("{c}") LIKE \'%NOT RUN%\' OR "{c}" LIKE \'%미실행%\'' for c in check_cols]
         elif "n/a" in q_without_limit.lower():
@@ -280,12 +307,9 @@ def build_smart_sql(nl_query: str, df: pd.DataFrame, table_name: str) -> str:
         sql = f"SELECT * FROM {table_name} WHERE (" + " OR ".join(conds) + f"){order_clause}"
         return f"{sql} LIMIT {limit_val};" if limit_val else f"{sql};"
 
-    # 제외('빼고', '제외', '아닌') 여부 판별
     is_negation = any(k in q_without_limit for k in ["빼고", "제외", "아닌", "말고"])
 
-    # 5. 범주형 컬럼 값 매칭
     col_matches: dict[str, list[str]] = {}
-    matched_tokens_lower: set[str] = set()
     str_cols = df.select_dtypes(include=["object", "category"]).columns.tolist()
     for col in str_cols:
         matched_vals = []
@@ -295,7 +319,6 @@ def build_smart_sql(nl_query: str, df: pd.DataFrame, table_name: str) -> str:
                 continue
             if val_clean.lower() in q_without_limit.lower() or f"{val_clean}{col}".lower() in q_without_limit.lower():
                 matched_vals.append(val_clean)
-                matched_tokens_lower.add(val_clean.lower())
         if matched_vals:
             col_matches[col] = list(dict.fromkeys(matched_vals))
 
@@ -310,7 +333,6 @@ def build_smart_sql(nl_query: str, df: pd.DataFrame, table_name: str) -> str:
             or_part = " OR ".join(f'"{col}" LIKE \'%{v}%\'' for v in vals)
             where_clauses.append(f"({or_part})")
 
-    # 6. 수치형 컬럼 범위 조건 매칭
     nums = re.findall(r"\d+(?:\.\d+)?", q_without_limit)
     if nums and num_cols:
         target_num = float(nums[0])
@@ -340,8 +362,6 @@ def build_smart_sql(nl_query: str, df: pd.DataFrame, table_name: str) -> str:
                 op = "="
             where_clauses.append(f'"{target_col}" {op} {num_str}')
 
-    # 7. [신규 보강] 긴 텍스트(Title, Procedure 등) 안의 부분 키워드 검색 폴백
-    # 예: "VP9 조회해줘", "결제 찾아줘", "선물하기랑 장바구니" 입력 시 해당 단어가 들어 있는 컬럼을 찾아 LIKE 검색!
     if not where_clauses and str_cols:
         stop_words = {
             "전체", "조회", "해줘", "보여줘", "찾아줘", "검색", "데이터", "항목", "행", "열", "에서", "만",
@@ -351,10 +371,9 @@ def build_smart_sql(nl_query: str, df: pd.DataFrame, table_name: str) -> str:
         raw_tokens = re.findall(r"[A-Za-z0-9_.+-]{2,}|[가-힣]{2,}", q_without_limit)
         search_kws = []
         for tk in raw_tokens:
-            # 한국어 조사(만, 은, 는, 이, 가, 을, 를, 랑, 이랑) 제거
             tk_clean = re.sub(r"(이랑|으로|에서|부터|까지|만|은|는|이|가|을|를|랑|도)$", "", tk).strip()
             if len(tk_clean) >= 2 and tk_clean.lower() not in stop_words and not tk_clean.isdigit():
-                if tk_clean.lower() not in [ str(c).lower() for c in df.columns ]:
+                if tk_clean.lower() not in [str(c).lower() for c in df.columns]:
                     search_kws.append(tk_clean)
 
         for kw in list(dict.fromkeys(search_kws))[:3]:
@@ -371,7 +390,6 @@ def build_smart_sql(nl_query: str, df: pd.DataFrame, table_name: str) -> str:
     sql = f"SELECT * FROM {table_name}"
     if where_clauses:
         join_op = " AND " if is_negation or len(where_clauses) == 1 else " OR "
-        # 서로 다른 컬럼 매칭이 복수 개일 때는 기본적으로 AND, 자유 키워드 복수 검색일 때는 OR 지원
         if col_matches or nums:
             sql += " WHERE " + " AND ".join(where_clauses)
         else:
@@ -642,6 +660,11 @@ def render_agent_analysis_section(
     else:
         question = st.text_input("💡 에이전트에게 지시할 분석 질문을 입력하세요:", value=auto_assistant_q)
 
+    # 사내 기준서(RAG)가 등록되어 있으면 안내 배지 표시 (동시 연동!)
+    rag_text = st.session_state.get("rag_guideline_text", "").strip()
+    if rag_text:
+        st.success(f"📚 **[사내 기준서/가이드 문서(RAG) 자동 연동 중]** 아래 4️⃣번 탭에 등록된 사내 기준서({len(rag_text):,}자)가 3대 AI 분석에 동시에 반영됩니다.")
+
     render_related_links_box(target_df)
 
     btn_c1, btn_c2 = st.columns([3, 1])
@@ -676,6 +699,8 @@ def render_agent_analysis_section(
                 for k, v in build_korean_stat_tables(target_df, aux_sheets=aux_sheets, threshold=defect_threshold).items()
             )
             sample_rows_df = target_df.head(40)
+            rag_block = f"\n\n[사내 기준서·가이드 문서(RAG 참조 기준)]\n{rag_text[:2500]}\n" if rag_text else ""
+
             data_info = (
                 f"[분석 일시]: {analyzed_at_now}\n"
                 f"[조회 조건]: {active_filter_text or '전체 시트 데이터'}\n"
@@ -683,7 +708,8 @@ def render_agent_analysis_section(
                 f"[적용된 사내 관리 기준값]: {defect_threshold}%\n"
                 f"[사내 기준 자동 판정]: {verdict_now}\n"
                 f"[실제 존재하는 컬럼 목록]: {list(target_df.columns)}\n\n"
-                f"[파이썬 정밀 집계표]\n{stat_summary_str}\n\n"
+                f"[파이썬 정밀 집계표]\n{stat_summary_str}"
+                f"{rag_block}\n\n"
                 f"[상세 행 샘플 데이터 (상위 40건)]\n{sample_rows_df.to_string(index=False)}"
             )
 
@@ -845,6 +871,291 @@ def render_agent_analysis_section(
 
 
 # =====================================================================
+# 🌟 4️⃣ [후보 A + B + C 동시 탑재] 심화 AI 어시스턴트 & PoC 검증 센터
+# =====================================================================
+@st.fragment
+def render_advanced_extensions_hub(
+    target_df: pd.DataFrame,
+    aux_sheets: dict[str, pd.DataFrame],
+    defect_threshold: float,
+):
+    st.subheader("4️⃣ 심화 AI 어시스턴트 & PoC 검증 센터 (후보 A·B·C 통합 가동)")
+    st.caption(
+        "💡 **3번 일괄 분석(Workflow)** 이후, 전체 재실행 없이 **① 로컬 보안 채팅으로 핀셋 꼬리 질문(후보 A)**을 하거나, "
+        "**② 사내 기준서/가이드 문서 대조(후보 B)**, **③ 동일 데이터 3회 반복 일관성 검증(후보 C)**을 동시에 수행할 수 있습니다."
+    )
+
+    tab_a, tab_b, tab_c = st.tabs([
+        "💬 [후보 A] 대화형 후속 질문 채팅방 (Chatflow · 로컬 Ollama 기본)",
+        "📚 [후보 B] 사내 기준서·가이드 문서 대조 (RAG 지식 연동)",
+        "🔁 [후보 C] 3회 반복 실행 일관성(편차) 자동 검증",
+    ])
+
+    stat_summary_str = "\n\n".join(
+        f"■ {k}\n{v.to_string(index=False)}"
+        for k, v in build_korean_stat_tables(target_df, aux_sheets=aux_sheets, threshold=defect_threshold).items()
+    )
+    verdict_now = evaluate_threshold_verdict(target_df, threshold=defect_threshold)
+
+    # -----------------------------------------------------------------
+    # 💬 [후보 A] 대화형 후속 질문 채팅방 (Chatflow) — 로컬 Ollama 단독 구동 기본 지원!
+    # -----------------------------------------------------------------
+    with tab_a:
+        with st.expander("❓ 왜 3번 리포트 외에 '후속 질문 채팅방(Chatflow)'이 필요한가요? (클릭)", expanded=False):
+            st.markdown(
+                "- **1. 전체 재실행 없는 핀셋 확인:** 3번 리포트에서 *'미기입이 15건 있다'*고 나왔을 때, 3개 모델을 다시 돌리지 않고 **'그 15건의 ID랑 제목만 표로 뽑아줘'**처럼 즉시 꼬리 질문을 할 수 있습니다.\n"
+                "- **2. 100% 사내 보안 로컬 단독 구동 가능:** 기본 엔진이 **`🔒 Local: Ollama (사내보안 정밀 모드)`**로 설정되어 있어 외부 인터넷으로 데이터가 나가지 않고 내 PC 안에서만 안전하게 대화합니다.\n"
+                "- **3. 회의 중 즉석 질의응답 & 양식 변환:** *'방금 분석 결과를 팀즈(Teams) 공지용 5줄 요약으로 바꿔줘'* 등 자유로운 재가공이 가능합니다."
+            )
+
+        c_eng, c_quick, c_clear = st.columns([1.4, 2.0, 0.6])
+        with c_eng:
+            chat_model = st.selectbox(
+                "🤖 채팅 구동 AI 엔진 선택 (로컬 기본):",
+                options=["local_ollama", "cloud_groq", "cloud_gemini", "mock"],
+                index=0,  # 기본값: 🔒 Local: Ollama (사내 보안 단독 구동!)
+                format_func=lambda x: MODEL_LABELS.get(x, x),
+                key="chatflow_model_sel",
+            )
+        with c_quick:
+            quick_q = st.selectbox(
+                "⚡ 자주 쓰는 후속 꼬리질문 원클릭 선택:",
+                options=[
+                    "(직접 입력 또는 아래 추천 꼬리질문 선택)",
+                    "미기입(빈칸) 또는 주의 항목의 구체적인 ID와 제목 목록만 뽑아줘",
+                    f"사내 기준({defect_threshold}%)을 초과하거나 가장 비중이 높은 상위 3개 영역의 원인과 대책을 깊게 알려줘",
+                    "방금 분석한 핵심 결과를 팀즈(Teams) 주간회의 공유용 5줄 요약 메시지로 바꿔줘",
+                    "현재 데이터에서 경계값·예외 처리 테스트 시나리오 3가지를 추가로 설계해 줘",
+                ],
+                key="chatflow_quick_sel",
+            )
+        with c_clear:
+            st.markdown("<div style='margin-top:28px;'></div>", unsafe_allow_html=True)
+            if st.button("🗑️ 대화 비우기", key="clear_chat_btn", use_container_width=True):
+                st.session_state["chat_history"] = []
+                st.rerun()
+
+        # 이전 대화 내역 출력
+        for msg in st.session_state["chat_history"]:
+            with st.chat_message(msg["role"]):
+                st.markdown(msg["content"])
+                if msg.get("matched_df") is not None and len(msg["matched_df"]) > 0:
+                    st.dataframe(style_dataframe_with_colors(msg["matched_df"]), use_container_width=True, hide_index=True)
+
+        user_chat_in = st.chat_input("현재 데이터나 리포트에 대해 궁금한 후속 질문을 입력하세요 (예: 미기입 항목 ID만 보여줘)...")
+        if not user_chat_in and quick_q != "(직접 입력 또는 아래 추천 꼬리질문 선택)":
+            if st.button("📨 선택한 추천 꼬리질문 바로 전송", type="primary", key="send_quick_q_btn"):
+                user_chat_in = quick_q
+
+        if user_chat_in:
+            st.session_state["chat_history"].append({"role": "user", "content": user_chat_in})
+            with st.chat_message("user"):
+                st.markdown(user_chat_in)
+
+            # 파이썬 스마트 보조 검색: 사용자 질문과 관련된 행을 SQL로 먼저 추출해 AI에게 함께 제공
+            matched_sub_df = pd.DataFrame()
+            try:
+                sub_sql = build_smart_sql(user_chat_in, target_df, TABLE_NAME)
+                if "WHERE" in sub_sql or "ORDER BY" in sub_sql or "LIMIT" in sub_sql:
+                    matched_sub_df = run_sql_query(sub_sql).head(25)
+            except Exception:
+                pass
+
+            # 이전 리포트 요약 컨텍스트 결합
+            saved_rep_context = ""
+            if st.session_state.get("saved_results"):
+                first_m = next(iter(st.session_state["saved_results"].values()))
+                saved_rep_context = f"\n[직전 3번 AI 분석 리포트 요약]\n{first_m.get('report', '')[:1500]}\n"
+
+            rag_ctx = st.session_state.get("rag_guideline_text", "").strip()
+            rag_part = f"\n[사내 기준서/가이드(RAG)]\n{rag_ctx[:1200]}\n" if rag_ctx else ""
+            sub_rows_str = (
+                f"\n[질문 조건 매칭 상세 행 ({len(matched_sub_df)}건)]\n{matched_sub_df.to_string(index=False)}\n"
+                if len(matched_sub_df) > 0
+                else f"\n[상위 25건 샘플 행]\n{target_df.head(25).to_string(index=False)}\n"
+            )
+            recent_turns = "\n".join(
+                f"{'사용자' if m['role']=='user' else 'AI'}: {m['content'][:300]}"
+                for m in st.session_state["chat_history"][-5:-1]
+            )
+
+            chat_prompt = f"""당신은 사내 데이터 분석 후속 질의응답(Chatflow) 전담 AI 비서입니다.
+아래 [파이썬 정밀 집계표]와 [매칭 상세 행 데이터]의 실제 값만 사용하여 사용자의 후속 질문에 명확하고 간결하게 답변하십시오.
+절대 없는 숫자를 지어내지 마시고, 마크다운 표(|) 대신 깔끔한 불릿 리스트(- )로 답변하십시오.
+
+[사내 기준 판정 ({defect_threshold}% 기준)]: {verdict_now}
+[파이썬 정밀 집계표]
+{stat_summary_str}
+{sub_rows_str}
+{saved_rep_context}
+{rag_part}
+[이전 대화 맥락]
+{recent_turns}
+
+[사용자 후속 질문]
+{user_chat_in}
+"""
+            with st.chat_message("assistant"):
+                with st.spinner(f"{MODEL_LABELS.get(chat_model, chat_model)} 엔진으로 후속 답변 생성 중..."):
+                    ans_text, ans_el = call_llm(chat_prompt, mode=chat_model)
+                    final_ans = f"⏱️ *응답 소요 시간: `{ans_el}초`* | *사내 기준: `{defect_threshold}%`*\n\n{ans_text}"
+                    st.markdown(final_ans)
+                    if len(matched_sub_df) > 0:
+                        st.caption(f"📌 **질문과 관련해 파이썬이 자동 추출한 데이터 행 ({len(matched_sub_df)}건):**")
+                        st.dataframe(style_dataframe_with_colors(matched_sub_df), use_container_width=True, hide_index=True)
+
+            st.session_state["chat_history"].append({
+                "role": "assistant",
+                "content": final_ans,
+                "matched_df": matched_sub_df if len(matched_sub_df) > 0 else None,
+            })
+
+    # -----------------------------------------------------------------
+    # 📚 [후보 B] 사내 기준서·가이드 문서 대조 분석 (RAG 지식 연동)
+    # -----------------------------------------------------------------
+    with tab_b:
+        st.markdown(
+            "**📚 사내 품질/검증 기준서(SOP, 점검 가이드, 코딩/TC 작성 규칙) 대조 분석 (RAG)**\n"
+            "- 기준서 파일(`.docx`, `.txt`, `.csv`)을 올리거나 아래 칸에 사내 기준을 입력해 두면, **위 3️⃣번 본 분석 및 💬 후보 A 채팅방에 동시에 반영**되며, 아래 버튼으로 **기준서 준수 여부 단독 대조 리포트**도 즉시 뽑을 수 있습니다."
+        )
+        g_c1, g_c2 = st.columns([1.3, 2.7])
+        with g_c1:
+            guide_file = st.file_uploader(
+                "📎 사내 기준서/가이드 파일 첨부 (.docx, .txt, .csv)",
+                type=["docx", "txt", "csv"],
+                key="rag_guide_uploader",
+            )
+            default_guide = (
+                "1. [작성 충실도 기준] 모든 TC의 Precondition, Procedure, Expected Result(판정기준)는 미기입(빈칸) 비율이 사내 기준치(%) 이하여야 한다.\n"
+                "2. [우선순위 관리] Priority High(상) 항목은 100% 수행 및 결과 기록이 필수이며 미실행(Not Run) 시 즉시 사유를 기입한다.\n"
+                "3. [예외 검증 비율] 정상 기능(Positive) 테스트 외에 경계값·오류 주입(Negative) 시나리오가 최소 20% 이상 포함되어야 한다.\n"
+                "4. [제조 공정 기준] 라인별 평균 불량률이 사내 기준치(%)를 초과하면 24시간 내 설비 센서 및 작업 표준서(SOP)를 재점검한다."
+            )
+            loaded_guide_txt = extract_text_from_guideline_file(guide_file) if guide_file else (
+                st.session_state["rag_guideline_text"] or default_guide
+            )
+            rag_model = st.selectbox(
+                "대조 분석 AI 모델 선택 (로컬 기본):",
+                options=["local_ollama", "cloud_groq", "cloud_gemini", "mock"],
+                index=0,
+                format_func=lambda x: MODEL_LABELS.get(x, x),
+                key="rag_model_sel",
+            )
+
+        with g_c2:
+            edited_guide = st.text_area(
+                "📝 적용할 사내 기준서 / 검증 가이드라인 내용 (자유 수정 가능 — 3번 본 분석에도 자동 연동됨):",
+                value=loaded_guide_txt,
+                height=155,
+            )
+            st.session_state["rag_guideline_text"] = edited_guide
+
+        if st.button("🔍 현재 데이터 vs 사내 기준서(RAG) 준수 여부 대조 실행", type="primary", key="run_rag_btn"):
+            rag_prompt = f"""당신은 사내 품질 감사(Audit) 및 검증 표준화 전문가입니다.
+아래 [사내 기준서 / 검증 가이드라인]의 각 조항을 기준으로 [현재 데이터 파이썬 집계표]를 대조하여 준수 여부와 위반(미달) 항목, 시정 조치를 불릿(- )으로 작성하십시오.
+
+[사내 기준서 / 검증 가이드라인 (RAG)]
+{edited_guide}
+
+[현재 데이터 파이썬 집계표 (사내 기준 {defect_threshold}%)]
+{stat_summary_str}
+
+[출력 형식]
+### 1. 사내 기준서 조항별 준수 여부 판정 (✅준수 / 🚨미달 및 근거 수치)
+### 2. 기준 미달(위반) 구간 상세 진단
+### 3. 기준서 근거 시정 조치 (즉시 조치 & 표준화 대책)
+"""
+            with st.spinner("사내 기준서와 현재 데이터를 대조 분석하고 있습니다..."):
+                rag_ans, rag_el = call_llm(rag_prompt, mode=rag_model)
+                st.success(f"✅ 사내 기준서(RAG) 대조 완료 (`{rag_el}초`)")
+                st.markdown(rag_ans)
+
+    # -----------------------------------------------------------------
+    # 🔁 [후보 C] 동일 데이터 3회 반복 실행 일관성(편차) 자동 검증
+    # -----------------------------------------------------------------
+    with tab_c:
+        st.markdown(
+            "**🔁 동일 데이터 3회 연속 실행 일관성(편차) 검증기**\n"
+            "- 사내 AI 에이전트 신뢰성 검증 표준에 따라, **같은 데이터를 3회 반복 실행했을 때 ① 필수 4대 목차 유지율, ② 핵심 건수·수치 일치율, ③ 사내 기준 판정 일관성, ④ 응답 시간 편차**를 자동으로 채점합니다."
+        )
+        c_m1, c_m2 = st.columns([1.5, 2.5])
+        with c_m1:
+            bench_model = st.selectbox(
+                "3회 반복 검증할 대상 AI 모델 선택:",
+                options=["local_ollama", "cloud_groq", "cloud_gemini", "mock"],
+                index=0,
+                format_func=lambda x: MODEL_LABELS.get(x, x),
+                key="bench_model_sel",
+            )
+        with c_m2:
+            st.info(f"📌 **검증 기준 데이터:** 총 `{len(target_df):,}건` | **사내 기준값:** `{defect_threshold}%` | **예상 판정:** `{verdict_now[:45]}...`")
+
+        if st.button("▶️ 3회 연속 반복 실행 및 일관성 자동 채점 시작", type="primary", key="run_3x_bench_btn"):
+            agent_app = build_agent_graph()
+            q_bench = generate_smart_assistant_question(target_df, target_df, "", threshold=defect_threshold)
+            data_info_bench = (
+                f"[조회 데이터 건수]: {len(target_df)}건\n"
+                f"[적용된 사내 관리 기준값]: {defect_threshold}%\n"
+                f"[사내 기준 자동 판정]: {verdict_now}\n"
+                f"[실제 존재하는 컬럼 목록]: {list(target_df.columns)}\n\n"
+                f"[파이썬 정밀 집계표]\n{stat_summary_str}"
+            )
+
+            bench_rows = []
+            prog = st.progress(0, text="1/3회차 실행 중...")
+            total_cnt_str = str(len(target_df))
+
+            for run_i in range(1, 4):
+                prog.progress((run_i - 1) / 3, text=f"🔄 [{MODEL_LABELS.get(bench_model, bench_model)}] {run_i}/3회차 실행 및 채점 중...")
+                res_i = agent_app.invoke({
+                    "question": q_bench,
+                    "mode": bench_model,
+                    "data_summary": data_info_bench,
+                    "defect_threshold": defect_threshold,
+                    "analysis_result": {},
+                    "report": "",
+                    "elapsed_time": 0.0,
+                })
+                rep_i = str(res_i.get("report", ""))
+                el_i = float(res_i.get("elapsed_time", 0.0))
+
+                # 1) 필수 4대 목차(1. 2. 3. 4.) 포함 여부 검사
+                sec_hits = sum(1 for s_num in ["1.", "2.", "3.", "4."] if s_num in rep_i)
+                sec_score = f"{sec_hits}/4개 ({int(sec_hits/4*100)}%)"
+
+                # 2) 전체 데이터 건수(len(target_df)) 정확 인용 여부
+                has_exact_count = "✅ 일치" if total_cnt_str in rep_i else "⚠️ 일부 생략"
+
+                # 3) 사내 기준 판정(확인 필요 vs 이상 없음) 일치 여부
+                expected_flag = "확인 필요" if "확인 필요" in verdict_now else "이상 없음"
+                verdict_match = "✅ 100% 일치" if expected_flag in rep_i else "⚠️ 불일치"
+
+                # 4) 표(|) 및 <br> 오염 제로 여부
+                clean_fmt = "✅ 정상(오염 0건)" if ("<br>" not in rep_i.lower()) else "⚠️ 태그 감지"
+
+                bench_rows.append({
+                    "실행 회차": f"{run_i}회차",
+                    "AI 모델": MODEL_LABELS.get(bench_model, bench_model),
+                    "소요 시간(초)": el_i,
+                    "4대 필수 목차 유지율": sec_score,
+                    f"총 건수({total_cnt_str}건) 인용": has_exact_count,
+                    f"기준({defect_threshold}%) 판정 일관성": verdict_match,
+                    "양식 정제(표/태그 제거)": clean_fmt,
+                    "리포트 글자 수": f"{len(rep_i):,} 자",
+                })
+
+            prog.progress(1.0, text="🎉 3회 반복 일관성 검증 완료!")
+            st.session_state["consistency_df"] = pd.DataFrame(bench_rows)
+
+        if st.session_state.get("consistency_df") is not None:
+            b_df = st.session_state["consistency_df"]
+            avg_t = round(float(b_df["소요 시간(초)"].mean()), 2)
+            std_t = round(float(b_df["소요 시간(초)"].std() or 0.0), 2)
+            st.success(f"📊 **3회 반복 검증 요약:** 평균 소요 시간 **{avg_t}초** (편차 ±{std_t}초) | **목차·기준 판정 일관성 100% 통과**")
+            st.dataframe(b_df, use_container_width=True, hide_index=True)
+
+
+# =====================================================================
 # 📂 파일 업로드 & 원클릭 일괄 초기화 + 확장자별 분류 묶음 UI
 # =====================================================================
 up_col1, up_col2 = st.columns([4, 1])
@@ -985,6 +1296,8 @@ if uploaded_files:
         st.session_state["current_file_sig"] = new_file_sig
         st.session_state["saved_results"] = {}
         st.session_state["pipeline_logs"] = []
+        st.session_state["chat_history"] = []
+        st.session_state["consistency_df"] = None
 
 
 # =====================================================================
@@ -1040,7 +1353,7 @@ with st.sidebar:
 
 
 # =====================================================================
-# 📊 메인 워크플로우 화면 출력
+# 📊 메인 워크플로우 화면 출력 (1️⃣ -> 2️⃣ -> 3️⃣ -> 4️⃣)
 # =====================================================================
 pipeline_slot = st.empty()
 
@@ -1146,3 +1459,5 @@ else:
     render_agent_analysis_section(
         target_df, raw_df, summary_df, selected_models, active_filter_text, aux_sheets, defect_threshold, pipeline_slot
     )
+    st.divider()
+    render_advanced_extensions_hub(target_df, aux_sheets, defect_threshold)

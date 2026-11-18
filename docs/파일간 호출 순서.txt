@@ -1,0 +1,31 @@
+[사용자 파일 업로드 (.csv / .xlsx / .docx / .txt) & 사내 기준값(%) 슬라이더 설정]
+   │
+   ▼
+① app.py (초기 설정 로드: data_agent/config.py)
+   │  ├─ 다중 파일 확장자별(Excel/CSV/Word/TXT) 자동 분류 및 원클릭 전체 초기화 제공
+   │  └─ 파일 전달 ──▶ ② data_agent/tools/data_loader.py
+   │                       ├─ 엑셀 메인 시트 vs 보조 시트(Summary/Environment) 분리 및 RGB 셀 색상 감지
+   │                       ├─ 워드(.docx) 본문 문단 및 내장 표 분리
+   │                       └─ SQLite DB(internal_analysis.db) 적재 후 반환
+   ▼
+③ data_agent/tools/visualizer.py & app.py (1️⃣ 자연어 SQL 조회 & 2️⃣ 다차원 시각화)
+   │  ├─ render_validation_banner() : 문서 양식·작성률(%)·단일값 컬럼 자동 검증 및 사내 기준(%) 즉시 판정
+   │  ├─ build_smart_sql()          : 전체조회 / 부분 키워드(VP9, 결제 등) / 미기입 / 제외 / 정렬 SQL 변환
+   │  └─ render_smart_charts()      : 4대 KPI 카드 + 가로형 TOP 순위 차트 + 유사 제목 클러스터링 차트 출력
+   ▼
+④ app.py (3️⃣ 에이전트 병렬 분석 실행) ──▶ ⑤ data_agent/graph.py (data_agent/state.py 기반)
+   │                                           ├─ [Step 1] nodes/analyzer_node.py : 파이썬 고속 통계·이상치 추출
+   │                                           └─ [Step 2] nodes/reporter_node.py : 사내 기준 판정 배너 + 무환각 리포트 조립
+   │                                                  │
+   │                                                  ▼
+   │                                           ⑥ data_agent/llm.py (3대 AI 모델 동시 병렬 추론)
+   │                                              ├─ 🔒 Local: Ollama / ⚡ Cloud: Groq / ☁️ Cloud: Gemini
+   ▼
+⑦ data_agent/excel_exporter.py (최종 산출물 패키징)
+   │  ├─ 📥 마스터 엑셀(.xlsx) : 1_모델별_종합비교(분석일시·기준판정) + 2_시트통합요약_및_핵심집계 + 3_원본데이터
+   │  └─ 📄 마스터 워드(.docx) : [1페이지] 전체 종합 요약표 + [2페이지~] AI별 강제 쪽나누기(빈 페이지 0건) 상세 보고서
+   ▼
+⑧ app.py (4️⃣ 심화 AI 어시스턴트 & PoC 검증 센터 — A·B·C 동시 가동)
+      ├─ 💬 [후보 A] 대화형 후속 질문 채팅방 (로컬 Ollama 기본 구동, 핀셋 꼬리질문 & 매칭 행 즉시 추출)
+      ├─ 📚 [후보 B] 사내 기준서·가이드 문서(RAG) 대조 분석 (3번 본 분석 동시 연동 + 단독 감사 리포트)
+      └─ 🔁 [후보 C] 동일 데이터 3회 연속 실행 일관성(목차·건수·기준판정·속도 편차) 자동 채점기
