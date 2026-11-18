@@ -79,7 +79,6 @@ if "chat_popup_minimized" not in st.session_state:
 if "consistency_data" not in st.session_state:
     st.session_state["consistency_data"] = None
 
-# 플로팅 팝업창 폭 동적 설정 (기본 620px / 크게 보기 920px)
 popup_width_css = "min(920px, 72vw)" if st.session_state.get("chat_popup_wide") else "min(620px, 48vw)"
 
 st.markdown(
@@ -132,12 +131,16 @@ st.markdown(
 )
 
 
-def _build_compact_sample_str(df: pd.DataFrame, max_rows: int = 10) -> str:
+def _build_compact_sample_str(df: pd.DataFrame, max_rows: int = 100) -> str:
+    """
+    데이터 행을 AI에게 전달할 때 TC-001~TC-015에서 잘리지 않도록 충분히(최대 100건 전체) 전달하되,
+    긴 절차서 문장만 한 줄로 요약하여 토큰 초과를 방지합니다.
+    """
     if df is None or len(df) == 0:
-        return "샘플 없음"
+        return "데이터 없음"
     sub = df.head(max_rows).copy()
     for c in sub.columns:
-        sub[c] = sub[c].apply(lambda x: shorten_long_label(str(x).replace("\n", " "), 42))
+        sub[c] = sub[c].apply(lambda x: shorten_long_label(str(x).replace("\n", " "), 38))
     return sub.to_string(index=False)
 
 
@@ -249,6 +252,45 @@ def style_dataframe_with_colors(df: pd.DataFrame):
     return df
 
 
+def _detect_mentioned_columns(query_str: str, df_columns: list) -> list:
+    """
+    사용자 질문(예: 'Procedure: 미기입 1건', 'Expected Result 미기입 4건', '기대결과 빈칸')에서
+    지목된 특정 컬럼명을 정확히 찾아냅니다.
+    """
+    q_low = query_str.lower()
+    q_norm = re.sub(r"[\s_\-]+", "", q_low)
+
+    alias_map = {
+        "procedure": ["procedure", "절차", "수행절차", "테스트절차"],
+        "expectedresult": ["expected result", "expected", "기대결과", "예상결과", "판정기준", "pass/fail criteria"],
+        "precondition": ["precondition", "pre-condition", "사전조건", "전제조건"],
+        "description": ["description", "설명", "상세설명"],
+        "actualresult": ["actual result", "actual", "실제결과"],
+        "executionstatus": ["execution status", "status", "실행상태", "판정상태"],
+        "priority": ["priority", "우선순위", "중요도"],
+        "category": ["category", "카테고리", "분류"],
+        "title": ["title", "제목", "테스트케이스명"],
+    }
+
+    matched_cols = []
+    for col in df_columns:
+        c_str = str(col).strip()
+        c_low = c_str.lower()
+        c_norm = re.sub(r"[\s_\-]+", "", c_low)
+        if not c_norm or c_low in ("id", "tc id", "번호", "시트명", "파일명"):
+            continue
+        if c_low in q_low or c_norm in q_norm:
+            matched_cols.append(col)
+            continue
+        for key_norm, aliases in alias_map.items():
+            if key_norm in c_norm:
+                if any(a in q_low for a in aliases):
+                    matched_cols.append(col)
+                    break
+
+    return list(dict.fromkeys(matched_cols))
+
+
 def build_smart_sql(nl_query: str, df: pd.DataFrame, table_name: str) -> str:
     if not nl_query or not nl_query.strip():
         return f"SELECT * FROM {table_name};"
@@ -299,9 +341,9 @@ def build_smart_sql(nl_query: str, df: pd.DataFrame, table_name: str) -> str:
         sql = f"SELECT * FROM {table_name} WHERE (" + " OR ".join(or_likes) + f"){order_clause}"
         return f"{sql} LIMIT {limit_val};" if limit_val else f"{sql};"
 
-    if any(k in q_without_limit.lower() for k in ["미기입", "빈칸", "공란", "미실행", "not run", "n/a"]):
-        target_c = next((c for c in df.columns if str(c).lower() in q_without_limit.lower()), None)
-        check_cols = [target_c] if target_c else [
+    if any(k in q_without_limit.lower() for k in ["미기입", "미기재", "빈칸", "공란", "누락", "미실행", "not run", "n/a"]):
+        mentioned_cols = _detect_mentioned_columns(q_without_limit, list(df.columns))
+        check_cols = mentioned_cols if mentioned_cols else [
             c for c in df.columns if str(c).lower() not in ("_polarion", "id", "tc id", "번호", "시트명", "파일명")
         ]
         if any(k in q_without_limit.lower() for k in ["미실행", "not run"]):
@@ -462,7 +504,7 @@ def generate_smart_assistant_question(
             f"[AI 비서 자동 맞춤 질문] {scope_title} ({stat_str}) 데이터를 바탕으로 "
             f"① 실제 존재하는 분류 열({col_list_str})별 건수·비중(%) 및 사내 기준({threshold}%) 이상 항목, "
             f"② 유사 시나리오 키워드 묶음 분포, "
-            f"③ 미기입률 사내 기준({threshold}%) 초과 컬럼 및 실행 상태 점검, "
+            f"③ 미기입률 사내 기준({threshold}%) 초과 컬럼(해당 TC ID 포함) 및 실행 상태 점검, "
             f"④ QA·개발팀의 즉시 조치(24h) 및 검증 표준화 대책(1개월)을 원본 샘플 나열 없이 1~4번 목차로만 깔끔하게 분석해 줘."
         )
 
@@ -537,47 +579,92 @@ def render_related_links_box(target_df: pd.DataFrame):
 
 
 # =====================================================================
-# 💬 [기능 A 핵심 엔진] 1번 조회 데이터(예: 배달 14건)와 100% 동기화되는 채팅 엔진
+# 💬 [기능 A 핵심 엔진] 컬럼별 미기입·N/A·특정 조건을 정확히 핀셋 추출하는 채팅 엔진
 # =====================================================================
 def _filter_within_target_df(user_q: str, target_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    [핵심 해결]
+    1) 사용자가 'Procedure 미기입 1건', 'Expected Result 미기입 4건'처럼 특정 컬럼명을 언급하면
+       전체 컬럼이 아니라 **해당 컬럼만** 정확히 검사합니다!
+    2) '미기입/미기재/빈칸/공란/누락' 질문 시에는 N/A나 Not Run을 섞지 않고 **진짜 빈칸('-', '')만** 먼저 추출하여
+       정확히 그 1건, 그 4건만 뽑아냅니다!
+    """
     if target_df is None or len(target_df) == 0 or not user_q.strip():
         return pd.DataFrame()
 
     q_low = user_q.lower()
-    row_text = target_df.astype(str).agg(" ".join, axis=1)
+    mentioned_cols = _detect_mentioned_columns(user_q, list(target_df.columns))
+    check_cols = mentioned_cols if mentioned_cols else [
+        c for c in target_df.columns if str(c).lower() not in ("_polarion", "id", "tc id", "번호", "시트명", "파일명")
+    ]
 
-    if any(k in q_low for k in ["미기입", "빈칸", "공란", "n/a", "not run", "미실행", "주의", "불합격", "fail"]):
+    # 1) 미기입 / 빈칸 / N/A / 미실행 / 불합격 질문 처리
+    is_empty_q = any(k in q_low for k in ["미기입", "미기재", "빈칸", "공란", "누락", "비어", "없는"])
+    is_na_q = "n/a" in q_low
+    is_notrun_q = any(k in q_low for k in ["미실행", "not run"])
+    is_fail_q = any(k in q_low for k in ["불합격", "fail", "빨강", "주의"])
+
+    if is_empty_q or is_na_q or is_notrun_q or is_fail_q:
         mask = pd.Series(False, index=target_df.index)
-        for col in target_df.columns:
-            if str(col).lower() in ("_polarion", "id", "tc id", "번호", "시트명", "파일명"):
-                continue
+        for col in check_cols:
             s_col = target_df[col].astype(str).str.strip()
-            mask |= s_col.isin(["-", "", "N/A", "n/a", "Not Run", "not run", "미실행", "FAIL", "불합격"])
-            mask |= s_col.str.contains("빈칸|빨강|주의|FAIL", case=False, na=False)
-        return target_df[mask].head(20)
+            if is_empty_q and not (is_na_q or is_notrun_q):
+                # 순수 미기입(빈칸 '-' 또는 '')만 정확히 매칭! (Description의 N/A가 섞이지 않음)
+                mask |= s_col.isin(["-", "", "(빈칸)"]) | s_col.str.startswith("[빈칸")
+            else:
+                if is_empty_q:
+                    mask |= s_col.isin(["-", "", "(빈칸)"]) | s_col.str.startswith("[빈칸")
+                if is_na_q:
+                    mask |= s_col.str.upper() == "N/A"
+                if is_notrun_q:
+                    mask |= s_col.str.contains("not run|미실행", case=False, na=False)
+                if is_fail_q:
+                    mask |= s_col.str.contains("빨강|주의|fail|불합격", case=False, na=False)
 
+        res_sub = target_df[mask]
+        # 만약 순수 빈칸으로 0건이 나왔다면 N/A까지 포함해 재탐색
+        if len(res_sub) == 0 and is_empty_q:
+            for col in check_cols:
+                s_col = target_df[col].astype(str).str.strip()
+                mask |= s_col.str.upper().isin(["N/A", "NOT RUN", "-"])
+            res_sub = target_df[mask]
+        return res_sub
+
+    # 2) 특정 TC ID(예: TC-015, TC-042)를 직접 물어본 경우
+    tc_ids = re.findall(r"(?:TC|RTC)[\-_]?\d+", user_q, flags=re.IGNORECASE)
+    if tc_ids:
+        row_text = target_df.astype(str).agg(" ".join, axis=1)
+        mask = pd.Series(False, index=target_df.index)
+        for tid in tc_ids:
+            mask |= row_text.str.contains(re.escape(tid), case=False, na=False)
+        return target_df[mask]
+
+    # 3) 일반 키워드 질문 매칭
     stop_words = {
         "전체", "조회", "해줘", "보여줘", "찾아줘", "검색", "데이터", "항목", "행", "열", "에서", "만",
         "그리고", "또는", "이나", "이랑", "랑", "과", "와", "포함", "있는", "없는", "표로", "목록", "뽑아줘",
         "요약", "분석", "보고서", "현재", "핵심", "현황", "상위", "집중", "건수", "비중", "간단히", "예외",
-        "경계값", "테스트", "시나리오", "추천", "대한", "관련", "알려줘", "설명", "자세히", "바탕으로",
+        "경계값", "테스트", "시나리오", "추천", "대한", "관련", "알려줘", "알려줄래", "설명", "자세히", "바탕으로",
+        "무슨", "어느", "어떤", "나오는데", "뜨는데", "결과", "내용중에",
     }
+    col_names_low = {str(c).lower() for c in target_df.columns}
     raw_tokens = re.findall(r"[A-Za-z0-9_.+-]{2,}|[가-힣]{2,}", user_q)
     kws = []
     for tk in raw_tokens:
-        tk_clean = re.sub(r"(이랑|으로|에서|부터|까지|만|은|는|이|가|을|를|랑|도|의|에)$", "", tk).strip()
+        tk_clean = re.sub(r"(이랑|으로|에서|부터|까지|만|은|는|이|가|을|를|랑|도|의|에|야|인지)$", "", tk).strip()
         if len(tk_clean) >= 2 and tk_clean.lower() not in stop_words and not tk_clean.isdigit():
-            if tk_clean.lower() not in [str(c).lower() for c in target_df.columns]:
+            if tk_clean.lower() not in col_names_low and not re.match(r"^\d+건$", tk_clean):
                 kws.append(tk_clean)
 
     if not kws:
         return pd.DataFrame()
 
+    row_text = target_df.astype(str).agg(" ".join, axis=1)
     mask = pd.Series(False, index=target_df.index)
     for kw in list(dict.fromkeys(kws))[:3]:
         mask |= row_text.str.contains(re.escape(kw), case=False, na=False)
 
-    return target_df[mask].head(20)
+    return target_df[mask]
 
 
 def _execute_chat_turn(
@@ -597,26 +684,36 @@ def _execute_chat_turn(
     saved_rep_context = ""
     if st.session_state.get("saved_results"):
         first_m = next(iter(st.session_state["saved_results"].values()))
-        saved_rep_context = f"\n[직전 3번 AI 분석 리포트 요약]\n{first_m.get('report', '')[:1400]}\n"
+        saved_rep_context = f"\n[직전 3번 AI 분석 리포트 요약]\n{first_m.get('report', '')[:1200]}\n"
 
-    sub_rows_str = (
-        f"\n[현재 조회 데이터({len(target_df)}건) 내 질문 매칭 행 ({len(matched_sub_df)}건)]\n{_build_compact_sample_str(matched_sub_df, 15)}\n"
-        if len(matched_sub_df) > 0
-        else f"\n[현재 조회 데이터({len(target_df)}건) 대표 샘플]\n{_build_compact_sample_str(target_df, 12)}\n"
-    )
+    # 핵심: 매칭된 행이 있으면 전수 전달하고, 매칭된 행이 없어도 전체 조회 행(최대 100건 전체)을 잘림 없이 전달!
+    if len(matched_sub_df) > 0:
+        sub_rows_str = (
+            f"\n[질문 조건에 정확히 매칭된 행 — 총 {len(matched_sub_df)}건 전수 명단]\n"
+            f"{_build_compact_sample_str(matched_sub_df, max_rows=len(matched_sub_df))}\n"
+        )
+    else:
+        sub_rows_str = (
+            f"\n[현재 조회된 전체 데이터 행 — 총 {len(target_df)}건 명단]\n"
+            f"{_build_compact_sample_str(target_df, max_rows=min(len(target_df), 100))}\n"
+        )
+
     recent_turns = "\n".join(
         f"{'사용자' if m['role']=='user' else 'AI비서'}: {m['content'][:250]}"
         for m in st.session_state["chat_history"][-5:-1]
     )
     scope_desc = f"검색조건('{active_filter_text}') 필터링된 {len(target_df)}건 (전체 원본 {len(raw_df)}건 중)" if active_filter_text else f"전체 {len(target_df)}건"
 
-    chat_prompt = f"""당신은 사용자와 실시간으로 대화하는 친절하고 명쾌한 '사내 데이터 AI 비서'입니다.
-장황한 보고서 형식이 아니라, 채팅방에서 대화하듯 **핵심 결론부터 3~6줄 이내의 간결한 불릿(- )으로 즉답**하십시오.
-반드시 아래 [현재 조회 범위({scope_desc})의 파이썬 집계표]와 [샘플 행]에 있는 진짜 숫자와 항목명만 말하고, 없는 숫자는 절대 지어내지 마십시오.
+    chat_prompt = f"""당신은 사용자와 실시간으로 대화하는 정확하고 명쾌한 '사내 데이터 AI 비서'입니다.
+아래 [파이썬 집계표 (컬럼별 미기입 해당 TC ID 전수 명단 포함)]와 [질문 조건에 정확히 매칭된 행]을 보고 **핵심 결론(해당 TC ID와 Title 등)을 3~6줄 이내의 불릿(- )으로 즉시 답변**하십시오.
+
+[절대 준수 규칙]
+1. **[샘플 핑계 절대 금지]** 아래 집계표의 `미기입(공란) 해당 TC ID 목록` 칸과 `[매칭된 행 전수 명단]`에 전체 {len(target_df)}건에 대한 모든 TC ID가 이미 100% 포함되어 있습니다. 절대 "샘플(TC-001~TC-015)에 포함되지 않아 알 수 없다"거나 "전체 데이터를 추가 조회해야 한다"는 말을 하지 마십시오!
+2. 사용자가 특정 컬럼의 미기입(예: Procedure 미기입 1건, Expected Result 미기입 4건)이 어느 TC인지 물으면, 아래 표에 적힌 **정확한 TC ID와 Title**을 빠짐없이 바로 알려주십시오.
 
 [현재 데이터 메모리 범위]: {scope_desc}
 [사내 기준({defect_threshold}%) 판정]: {verdict_now}
-[파이썬 집계표 (현재 조회된 {len(target_df)}건 기준)]
+[파이썬 집계표 (전체 {len(target_df)}건 전수 스캔 결과 및 미기입 TC ID 명단)]
 {stat_summary_str}
 {sub_rows_str}
 {saved_rep_context}
@@ -628,7 +725,7 @@ def _execute_chat_turn(
 """
     ans_text, ans_el = call_llm(chat_prompt, mode=chat_model)
     model_short = MODEL_LABELS.get(chat_model, chat_model).split("(")[0].strip()
-    final_ans = f"**{model_short}** (`{ans_el}초` · 대상: `{len(target_df)}건`)\n\n{ans_text}"
+    final_ans = f"**{model_short}** (`{ans_el}초` · 조회범위: `전체 {len(target_df)}건 전수 확인`)\n\n{ans_text}"
 
     st.session_state["chat_history"].append({
         "role": "assistant",
@@ -652,11 +749,11 @@ def render_chat_messenger_ui(
     )
     verdict_now = evaluate_threshold_verdict(target_df, threshold=defect_threshold)
     has_prev_rep = bool(st.session_state.get("saved_results"))
-    filter_badge = f"검색조건('{active_filter_text}') — 총 {len(target_df):,}건 (원본 {len(raw_df):,}건 중)" if active_filter_text else f"총 {len(target_df):,}건"
+    filter_badge = f"검색조건('{active_filter_text}') — 총 {len(target_df):,}건 (원본 {len(raw_df):,}건 중)" if active_filter_text else f"전체 {len(target_df):,}건 전수 연동"
 
     top_c1, top_c2, top_c3 = st.columns([2.0, 1.3, 0.7])
     with top_c1:
-        mem_badge = "✅ 3번 리포트 + 기초통계 연동됨" if has_prev_rep else "📊 1·2번 조회 데이터·통계 연동됨"
+        mem_badge = "✅ 3번 리포트 + 미기입 TC ID 전수 명단 연동됨" if has_prev_rep else "📊 전수 데이터·미기입 ID 명단 연동됨"
         st.markdown(
             f'<div style="background:#ecfdf5; border:1px solid #10b981; border-radius:8px; padding:8px 12px; font-size:0.82rem; color:#065f46; font-weight:600;">'
             f'🧠 <b>메모리:</b> {filter_badge} (기준 {defect_threshold}%) | {mem_badge}'
@@ -677,11 +774,11 @@ def render_chat_messenger_ui(
             st.session_state["chat_history"] = []
             st.rerun()
 
-    st.caption("⚡ **빠른 질문 칩 (클릭 시 현재 조회된 데이터 기준으로 바로 답변합니다):**")
+    st.caption("⚡ **빠른 질문 칩 (클릭 시 전체 조회 데이터를 전수 검사하여 즉시 답변합니다):**")
     chip_c1, chip_c2, chip_c3, chip_c4 = st.columns(4)
     triggered_q = None
-    if chip_c1.button("🔍 미기입·주의 행만 표로", key=f"chip1_{key_suffix}", use_container_width=True):
-        triggered_q = f"현재 조회된 {len(target_df)}건 중에서 미기입(빈칸) 또는 N/A, 주의가 필요한 항목들이 어떤 컬럼에 몇 건 있는지 요약해주고 해당 행을 보여줘."
+    if chip_c1.button("🔍 컬럼별 미기입 TC ID 명단", key=f"chip1_{key_suffix}", use_container_width=True):
+        triggered_q = f"현재 조회된 {len(target_df)}건 중에서 미기입(빈칸/공란)이 있는 컬럼 이름과, 각 컬럼별로 미기입된 실제 TC ID(및 제목) 목록을 빠짐없이 알려줘."
     if chip_c2.button("📊 상위 집중 항목 요약", key=f"chip2_{key_suffix}", use_container_width=True):
         triggered_q = f"현재 조회된 {len(target_df)}건에서 사내 기준({defect_threshold}%) 이상이거나 가장 비중이 큰 상위 3개 항목의 건수와 비중을 요약해줘."
     if chip_c3.button("📋 분석 데이터 핵심 5줄 요약", key=f"chip3_{key_suffix}", use_container_width=True):
@@ -690,13 +787,13 @@ def render_chat_messenger_ui(
         triggered_q = f"현재 조회된 {len(target_df)}건 데이터의 주요 기능을 바탕으로 추가로 보강하면 좋을 예외 처리(Negative) 또는 경계값 테스트 시나리오 3가지만 추천해줘."
 
     user_input = st.chat_input(
-        f"현재 조회된 {len(target_df):,}건 데이터에 대해 궁금한 점을 입력하세요...",
+        f"전체 {len(target_df):,}건에 대해 질문하세요 (예: Procedure 미기입 1건 무슨 TC야? / Expected Result 미기입 4건 알려줘)...",
         key=f"chat_in_{key_suffix}",
     )
 
     active_q = triggered_q or user_input
     if active_q:
-        with st.spinner(f"현재 조회된 {len(target_df):,}건 데이터 기준으로 답변 생성 중..."):
+        with st.spinner(f"전체 {len(target_df):,}건 전수 데이터를 기반으로 답변 생성 중..."):
             _execute_chat_turn(
                 active_q,
                 chat_model,
@@ -713,14 +810,14 @@ def render_chat_messenger_ui(
         if not st.session_state["chat_history"]:
             with st.chat_message("assistant"):
                 st.markdown(
-                    f"안녕하세요! 현재 1번에서 조회된 **{filter_badge}** 데이터와 **2번 차트·3번 리포트**를 정확히 연동하고 있습니다.\n"
-                    f"위 **빠른 질문 칩 버튼**을 누르시거나, 아래 입력창에 궁금한 점을 물어보세요! *(기본: 사내 보안 로컬 Ollama 구동)*"
+                    f"안녕하세요! 현재 조회된 **{filter_badge}**의 **전수 미기입 TC ID 명단과 통계표**를 모두 숙지하고 있습니다.\n"
+                    f"예: *'Procedure 미기입 1건 무슨 TC야?'*, *'Expected Result 미기입 4건 어느 TC인지 알려줘'*처럼 물어보시면 정확한 TC ID와 표를 즉시 보여드립니다!"
                 )
         for msg in st.session_state["chat_history"]:
             with st.chat_message(msg["role"]):
                 st.markdown(msg["content"])
                 if msg.get("matched_df") is not None and len(msg["matched_df"]) > 0:
-                    st.caption(f"📌 **현재 조회 데이터({len(target_df)}건) 내 매칭된 행 ({len(msg['matched_df'])}건):**")
+                    st.caption(f"📌 **전체 {len(target_df)}건 중 질문 조건에 정확히 매칭된 행 ({len(msg['matched_df'])}건):**")
                     st.dataframe(style_dataframe_with_colors(msg["matched_df"]), use_container_width=True, hide_index=True)
 
 
@@ -731,22 +828,14 @@ def render_floating_popup_chat_window(
     aux_sheets: dict[str, pd.DataFrame],
     defect_threshold: float,
 ):
-    """
-    [핵심 해결]
-    배경 화면(1·2·3번)의 마우스 휠 스크롤을 막지 않는 우측 고정 플로팅 팝업 채팅창입니다.
-    - 이 팝업창이 떠 있는 동안 4번 섹션에는 '⏸️ 팝업 채팅창 모드 실행 중' 상태가 표시되며,
-    - 사용자는 마우스 휠을 굴려 1번·2번(그래프 차트)·3번(리포트)을 자유롭게 위아래로 왔다 갔다 보면서 대화할 수 있습니다!
-    """
     with st.container():
-        # CSS :has(#floating-chat-marker)가 이 컨테이너만 우측 플로팅 팝업창으로 고정시킵니다.
         st.markdown('<div id="floating-chat-marker"></div>', unsafe_allow_html=True)
 
-        # 팝업 상단 타이틀 바 및 제어 버튼 (크게/작게, 접기/펼치기, 닫기)
         h_c1, h_c2, h_c3, h_c4 = st.columns([2.2, 0.75, 0.65, 0.75])
         with h_c1:
             st.markdown(
                 f'<div style="background:#059669; color:white; padding:7px 12px; border-radius:8px; font-weight:700; font-size:0.9rem;">'
-                f'💬 팝업 채팅창 (조회 {len(target_df):,}건 연동 중)'
+                f'💬 팝업 채팅창 (전체 {len(target_df):,}건 전수 연동)'
                 f'</div>',
                 unsafe_allow_html=True,
             )
@@ -963,7 +1052,7 @@ def render_visualization_fragment(
     v_tab1, v_tab2, v_tab3 = st.tabs([
         "🎯 핵심 다차원 대시보드 (TOP 순위·시나리오 그룹핑·사내 기준선 자동 연동)",
         "🛠️ 자유 조합 커스텀 차트 (모든 엑셀/CSV/문서 범용)",
-        f"📋 한글 기초통계 & 사내 기준({defect_threshold}%) 판정 집계표 (엑셀 2번 시트)",
+        f"📋 한글 기초통계 & 미기입 TC ID 전수 명단 (기준 {defect_threshold}%)",
     ])
 
     with v_tab1:
@@ -1089,13 +1178,13 @@ def render_agent_analysis_section(
                 f"[적용된 사내 관리 기준값]: {defect_threshold}%\n"
                 f"[사내 기준 자동 판정]: {verdict_now}\n"
                 f"[실제 존재하는 컬럼 목록]: {list(target_df.columns)}\n\n"
-                f"[파이썬 정밀 집계표]\n{stat_summary_str}\n\n"
+                f"[파이썬 정밀 집계표 (미기입 TC ID 전수 명단 포함)]\n{stat_summary_str}\n\n"
                 f"[대표 항목 참고용 요약 샘플 (인용 참고용이며 리포트에 절대 나열하지 말 것)]\n{compact_sample_str}"
             )
 
             new_results = {}
             logs = [
-                f"**[1~2단계 완료]** 총 `{len(target_df):,}건` 로드 및 통계 집계 완료 (분석 일시: `{analyzed_at_now}`, 기준값: `{defect_threshold}%`)",
+                f"**[1~2단계 완료]** 총 `{len(target_df):,}건` 전수 로드 및 미기입 ID 명단 집계 완료 (분석 일시: `{analyzed_at_now}`, 기준값: `{defect_threshold}%`)",
                 f"**[3단계 가동]** 선택 모델 `{len(selected_models)}개` 병렬 추론 시작",
             ]
             status_box = st.status("⚡ 선택한 AI 모델(정밀 모드)들을 동시에 병렬 실행하고 있습니다...", expanded=True)
@@ -1252,7 +1341,6 @@ def render_agent_analysis_section(
 
 # =====================================================================
 # 🌟 4️⃣ 대화형 후속 질문 채팅방(A) & 3회 반복 상세 차이점 검증기(C)
-# (좌우분할 완전 제거 + 배경 1·2·3번 자유 스크롤 가능한 플로팅 팝업창 탑재!)
 # =====================================================================
 @st.fragment
 def render_advanced_extensions_hub(
@@ -1269,12 +1357,8 @@ def render_advanced_extensions_hub(
         "🔁 [기능 C] 3회 반복 실행 '일관성 vs 차이점' 상세 비교 (파트회의 공유용 워드 .docx 추출)",
     ])
 
-    # -----------------------------------------------------------------
-    # 💬 [기능 A] 플로팅 팝업 채팅창 (켜면 4번은 '팝업 실행 중' 표시 + 1·2·3번 마우스 휠 자유 스크롤!)
-    # -----------------------------------------------------------------
     with tab_a:
         if st.session_state.get("chat_popup_mode", False):
-            # 1) 4번 본래 자리에는 '현재 팝업 채팅창 모드가 실행 중'임을 명확히 표시하고 복귀 버튼 제공
             st.warning(
                 "⏸️ **현재 [팝업 채팅창 모드]가 실행 중이어서 하단 4번 채팅방은 일시 중지되었습니다.**\n\n"
                 "- 화면 우측에 떠 있는 **팝업 채팅창**을 켜둔 채로 **마우스 스크롤 휠을 위아래로 자유롭게 굴려 1번(조회 표) · 2번(그래프 차트) · 3번(AI 리포트)을 마음대로 왔다 갔다 하며 확인**하실 수 있습니다!\n"
@@ -1285,7 +1369,6 @@ def render_advanced_extensions_hub(
                 st.session_state["chat_popup_minimized"] = False
                 st.rerun()
 
-            # 2) 화면을 가리지 않고 우측에 떠 있는 플로팅 팝업 채팅창 렌더링 (배경 스크롤 100% 가능!)
             render_floating_popup_chat_window(
                 target_df=target_df,
                 raw_df=raw_df,
@@ -1297,7 +1380,7 @@ def render_advanced_extensions_hub(
             pop_c1, pop_c2 = st.columns([2.6, 1.4])
             with pop_c1:
                 st.caption(
-                    f"💡 **현재 1번 조회 데이터({len(target_df):,}건) 및 3번 리포트와 100% 연동된 대화방입니다.** "
+                    f"💡 **현재 1번 조회 데이터({len(target_df):,}건)의 전수 미기입 ID 명단 및 3번 리포트와 100% 연동된 대화방입니다.** "
                     "우측 버튼을 누르면 **팝업 채팅창**이 뜨며, 팝업을 띄워둔 채로 **1·2·3번 화면을 자유롭게 위아래로 스크롤**할 수 있습니다."
                 )
             with pop_c2:
@@ -1316,9 +1399,6 @@ def render_advanced_extensions_hub(
                 chat_height=390,
             )
 
-    # -----------------------------------------------------------------
-    # 🔁 [기능 C] 3회 반복 실행 일관성·차이점 상세 검증 + 파트회의용 워드(.docx) 추출
-    # -----------------------------------------------------------------
     with tab_c:
         st.markdown(
             "**🔁 동일 데이터 3회 연속 실행 시 '무엇이 똑같이 유지되고, 무엇이 달라지는지' 상세 비교 검증**\n"
@@ -1740,7 +1820,7 @@ else:
     with tab_nl:
         st.caption(
             f"테이블(`{TABLE_NAME}`) 컬럼: `{list(raw_df.columns)}` | "
-            "💡 입력 예시: **`전체조회`**, **`배달`**, **`상위 30건`**, **`VP9 조회`**, **`미기입만 조회`**, **`Linux 빼고`**"
+            "💡 입력 예시: **`전체조회`**, **`Procedure 미기입`**, **`Expected Result 미기입`**, **`배달`**, **`상위 30건`**"
         )
         nl_question = st.text_input("조회 조건을 자연어로 입력하세요 (비워두면 제한 없이 전체 데이터를 조회합니다):", value="", key="nl_q_input")
         auto_sql = build_smart_sql(nl_question, raw_df, TABLE_NAME)

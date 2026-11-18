@@ -261,6 +261,12 @@ def build_korean_stat_tables(
     aux_sheets: dict[str, pd.DataFrame] | None = None,
     threshold: float = 1.5,
 ) -> dict[str, pd.DataFrame]:
+    """
+    [핵심 업그레이드]
+    전체 행(63건 등 전체 데이터)을 전수 스캔하여 각 컬럼의 미기입(공란) 건수뿐만 아니라
+    '미기입된 실제 TC ID (및 제목) 목록'을 표에 직접 기록합니다.
+    이를 통해 AI 리포트와 채팅방이 '샘플 외에 있어서 모른다'고 답하는 현상을 100% 원천 차단합니다!
+    """
     tables = {}
     if df is None or len(df) == 0:
         return tables
@@ -269,6 +275,19 @@ def build_korean_stat_tables(
     num_cols = df.select_dtypes(include=["number"]).columns.tolist()
     total_cnt = len(df)
 
+    # 식별자(ID) 컬럼 및 제목(Title) 컬럼 자동 탐색
+    id_col = next(
+        (c for c in all_cols if str(c).strip().lower() in ("id", "tc id", "tc_id", "test id", "_polarion", "번호", "라인", "일자")),
+        all_cols[0],
+    )
+    title_col = next(
+        (c for c in all_cols if any(k in str(c).lower() for k in ["title", "test case", "name", "제목", "시나리오", "purpose"])),
+        None,
+    )
+
+    id_list = [_clean_tag_str(v) for v in df[id_col].tolist()]
+    title_list = [_clean_tag_str(v) for v in df[title_col].tolist()] if title_col else [""] * total_cnt
+
     aux_df = summarize_aux_sheets(aux_sheets)
     if len(aux_df) > 0:
         tables["1. 보조 시트(Summary · Environment 등) 핵심 내용 통합 요약"] = aux_df
@@ -276,8 +295,22 @@ def build_korean_stat_tables(
     col_check_rows = []
     for col in all_cols:
         clean_list = [_clean_tag_str(v) for v in df[col].tolist()]
-        empty_cnt = sum(1 for v in clean_list if v in ("-", "", "(빈칸)"))
-        na_cnt = sum(1 for v in clean_list if v.lower() in ("n/a", "not run", "미실행"))
+        empty_cnt = 0
+        na_cnt = 0
+        empty_id_items = []
+        na_id_items = []
+
+        for idx, v in enumerate(clean_list):
+            row_label = f"{id_list[idx]}({shorten_long_label(title_list[idx], 16)})" if title_col and title_list[idx] != "-" else id_list[idx]
+            if v in ("-", "", "(빈칸)"):
+                empty_cnt += 1
+                if len(empty_id_items) < 20:
+                    empty_id_items.append(row_label)
+            elif v.lower() in ("n/a", "not run", "미실행"):
+                na_cnt += 1
+                if len(na_id_items) < 12:
+                    na_id_items.append(id_list[idx])
+
         filled_cnt = total_cnt - empty_cnt
         empty_rate = (empty_cnt / total_cnt * 100) if total_cnt > 0 else 0.0
         valid_vals = [v for v in clean_list if v not in ("-", "")]
@@ -288,17 +321,25 @@ def build_korean_stat_tables(
         else:
             col_verdict = f"✅ [양호] 기준({threshold}%) 이내"
 
+        if empty_cnt == 0:
+            missing_id_str = "없음 (전수 기재 완료)"
+        elif empty_cnt <= 20:
+            missing_id_str = ", ".join(empty_id_items)
+        else:
+            missing_id_str = f"{', '.join(empty_id_items[:15])} 외 {empty_cnt - 15}건"
+
         col_check_rows.append({
             "컬럼(열) 이름": str(col),
             "전체 건수": total_cnt,
             "기재 완료(건)": filled_cnt,
             "미기입/공란(건)": empty_cnt,
-            "N/A·미실행(건)": na_cnt,
             "미기입률(%)": f"{empty_rate:.1f}%",
-            "최다 기재값(대표)": shorten_long_label(top_val, 28),
+            "미기입(공란) 해당 TC ID 목록": missing_id_str,
+            "N/A·미실행(건)": na_cnt,
+            "최다 기재값(대표)": shorten_long_label(top_val, 24),
             f"사내 기준({threshold}%) 판정": col_verdict,
         })
-    tables[f"{len(tables) + 1}. 전체 컬럼별 데이터 작성 현황 및 기준({threshold}%) 판정"] = pd.DataFrame(col_check_rows)
+    tables[f"{len(tables) + 1}. 전체 컬럼별 데이터 작성 현황 및 미기입 TC ID 전수 명단 (기준 {threshold}%)"] = pd.DataFrame(col_check_rows)
 
     status_cols = [
         c for c in all_cols
@@ -395,7 +436,6 @@ def build_korean_stat_tables(
         if c_rows:
             tables[f"{len(tables) + 1}. [{c_col}] 실제 항목별 분포 및 기준({threshold}%) 비교"] = pd.DataFrame(c_rows)
 
-    title_col = next((c for c in all_cols if any(k in str(c).lower() for k in ["title", "test case", "name", "제목", "시나리오", "purpose"])), None)
     if title_col:
         topic_df = cluster_text_series_by_topic(df[title_col], max_groups=8)
         if not topic_df.empty:
@@ -714,9 +754,6 @@ def export_combined_analysis_to_excel(
     return output.getvalue()
 
 
-# =====================================================================
-# 📄 MS Word (.docx) 보고서 엔진 (빈 페이지 0건 보장 + 표 스타일 고도화)
-# =====================================================================
 def _docx_p(
     text: str,
     bold: bool = False,
@@ -730,12 +767,6 @@ def _docx_p(
     keep_with_next: bool = False,
     bottom_border_color: str | None = None,
 ) -> str:
-    """
-    OpenXML 문단 생성기:
-    - 빈 문단(<w:p/>)을 만들지 않고 space_before / space_after로만 간격을 제어하여 빈 페이지 생성을 원천 차단합니다.
-    - page_break_before=True 설정 시 <w:pageBreakBefore/>가 적용되어, 앞 내용이 페이지를 꽉 채워 이미 넘어간 경우
-      중복 페이지 나누기를 하지 않고 무조건 새 페이지 최상단에서 시작합니다.
-    """
     t_esc = escape(str(text))
     ppr_parts = []
     if page_break_before:
@@ -762,7 +793,6 @@ def _docx_p(
 
 
 def _docx_banner(sub_label: str, main_title: str, meta_line: str, page_break_before: bool = False) -> str:
-    """문서 상단 또는 개별 AI 페이지 최상단에 들어가는 다크 에메랄드(#064E3B) 타이틀 배너 표"""
     p1 = _docx_p(
         sub_label,
         bold=True,
@@ -801,12 +831,6 @@ def _docx_table(
     col_widths_pct: list[int] | None = None,
     header_bg: str = "059669",
 ) -> str:
-    """
-    경영진 보고서급 Word 표 생성기:
-    - 열 너비 비율(col_widths_pct) 명시적 지정
-    - 셀 내부 여백(tcMar: 상하 90, 좌우 130 dxa) 및 행 분할 방지(cantSplit)
-    - 1열 소프트 민트 배경(#F0FDF4), 짝수 행 줄무늬(#F8FAFC), '확인 필요' 경고 셀(#FEF2F2) 자동 하이라이트
-    """
     num_cols = len(headers)
     if not col_widths_pct or len(col_widths_pct) != num_cols:
         even_pct = 100 // max(1, num_cols)
@@ -840,7 +864,6 @@ def _docx_table(
         f'<w:tblGrid>{grid_cols}</w:tblGrid>'
     ]
 
-    # 헤더 행
     h_cells = []
     for idx, h in enumerate(headers):
         w_pct_50 = col_widths_pct[idx] * 50
@@ -853,7 +876,6 @@ def _docx_table(
         )
     tbl_xml.append(f'<w:tr><w:trPr><w:tblHeader/><w:cantSplit/></w:trPr>{"".join(h_cells)}</w:tr>')
 
-    # 데이터 행
     for r_idx, r in enumerate(rows):
         r_cells = []
         row_bg = "FFFFFF" if r_idx % 2 == 0 else "F8FAFC"
@@ -902,7 +924,6 @@ def _docx_table(
 
 
 def _pack_docx_xml(body_elements: list[str]) -> bytes:
-    """A4 용지 규격 및 여백(2.0cm)을 설정하여 OpenXML(.docx) 파일로 패키징합니다."""
     sect_pr = (
         '<w:sectPr>'
         '<w:pgSz w:w="11906" w:h="16838"/>'
@@ -938,7 +959,6 @@ def _pack_docx_xml(body_elements: list[str]) -> bytes:
 
 
 def _append_formatted_report_sections(body: list[str], report_text: str):
-    """각 섹션의 제목과 본문을 빈 줄(<w:p/>) 없이 깔끔한 들여쓰기와 여백으로 Word 본문에 추가합니다."""
     parsed = [
         s for s in parse_report_into_sections(report_text)
         if s["구분 항목"] not in ("자동 기준 판정 요약", "구동 AI 엔진 상세")
@@ -1022,15 +1042,6 @@ def export_combined_analysis_to_docx(
     model_labels: dict[str, str],
     threshold: float = 1.5,
 ) -> bytes:
-    """
-    [워드(DOCX) 보고서 출력 및 페이지 나누기 규칙 완벽 준수]
-    1. 1페이지 (종합 요약): 모든 API(AI) 분석 결과를 통합하여 핵심 인사이트와 '확인 필요' 사항을 요약 정리.
-    2. 2페이지 이후 (개별 분석): 각 API(AI)별 상세 분석 내용은 1페이지에 섞지 않고 각각 독립된 페이지 최상단에서 시작.
-    3. 빈 페이지(Blank Page) 원천 방지:
-       - 독립된 빈 페이지 나누기 문단(<w:br/>)이나 더미 빈 줄(<w:p/>)을 일절 생성하지 않음.
-       - 각 AI 섹션 첫 문단에만 <w:pageBreakBefore/>를 부여하여, 이전 섹션이 페이지 끝까지 꽉 차서 이미 넘어간 경우
-         중복 페이지 나누기를 자동 생략하고, 마지막 섹션 뒤에도 페이지 나누기를 삽입하지 않음.
-    """
     verdict_str = evaluate_threshold_verdict(df, threshold=threshold)
     valid_items = [
         (m_code, res)
@@ -1043,7 +1054,6 @@ def export_combined_analysis_to_docx(
     )
     model_names_str = ", ".join(model_labels.get(m, m) for m, _ in valid_items)
 
-    # 모든 AI 결과에서 '통합 핵심 인사이트'와 '확인 필요 및 즉시 조치 사항' 추출
     integrated_insights = []
     check_required_points = []
     summary_table_rows = []
@@ -1089,9 +1099,6 @@ def export_combined_analysis_to_docx(
         f"{verdict_str}\n" + ("\n".join(check_required_points[:3]) if check_required_points else "")
     ).strip()
 
-    # =========================================================================
-    # [1페이지] 종합 요약 (Executive Summary) — 1페이지에 깔끔하게 수렴
-    # =========================================================================
     body = [
         _docx_banner(
             sub_label="[사내 데이터 분석 AI Agent] 다중 AI 모델 종합 분석 보고서",
@@ -1144,16 +1151,11 @@ def export_combined_analysis_to_docx(
         ),
     ]
 
-    # =========================================================================
-    # [2페이지 이후] 각 API(AI)별 상세 분석 리포트 (독립 페이지 시작 + 빈 페이지 방지)
-    # =========================================================================
     for idx, (m_code, res) in enumerate(valid_items, start=1):
         m_name = model_labels.get(m_code, m_code)
         el = res.get("elapsed_time", 0.0)
         m_time = res.get("analyzed_at") or first_time
 
-        # 배너의 첫 문단에 page_break_before=True를 부여하여 무조건 새 페이지 최상단에서 시작!
-        # (앞 섹션이 페이지를 꽉 채워 이미 넘어간 경우 중복 페이지 나누기를 하지 않으며, 문서 끝에도 빈 페이지가 생기지 않음)
         body.append(
             _docx_banner(
                 sub_label=f"[개별 AI 상세 분석 섹션 {idx}/{len(valid_items)}] — 독립 페이지 분리 리포트",
