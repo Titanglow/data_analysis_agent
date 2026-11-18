@@ -56,38 +56,6 @@ if not CONFIG_FILE.exists():
 
 st.set_page_config(page_title="사내 데이터 분석 Agent", layout="wide")
 
-st.markdown(
-    """
-    <style>
-    :root { --primary-color: #059669 !important; }
-    span[data-baseweb="tag"],
-    div[data-baseweb="select"] span[data-baseweb="tag"],
-    [data-testid="stMultiSelect"] span[data-baseweb="tag"] {
-        background-color: #059669 !important;
-        color: #ffffff !important;
-        border-radius: 6px !important;
-        font-weight: 600 !important;
-    }
-    span[data-baseweb="tag"] span { color: #ffffff !important; }
-    div[role="radiogroup"] label > div:first-child { border-color: #059669 !important; }
-    div[role="radiogroup"] label[data-baseweb="radio"] > div:first-child {
-        background-color: #059669 !important;
-        border-color: #059669 !important;
-    }
-    button[kind="primary"], [data-testid="stBaseButton-primary"] {
-        background-color: #059669 !important;
-        border-color: #059669 !important;
-        color: white !important;
-    }
-    button[kind="primary"]:hover, [data-testid="stBaseButton-primary"]:hover {
-        background-color: #047857 !important;
-        border-color: #047857 !important;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
-
 if "saved_results" not in st.session_state:
     st.session_state["saved_results"] = {}
 if "last_analyzed_df" not in st.session_state:
@@ -102,15 +70,69 @@ if "uploader_key" not in st.session_state:
     st.session_state["uploader_key"] = 0
 if "chat_history" not in st.session_state:
     st.session_state["chat_history"] = []
+if "chat_popup_mode" not in st.session_state:
+    st.session_state["chat_popup_mode"] = False
+if "chat_popup_wide" not in st.session_state:
+    st.session_state["chat_popup_wide"] = False
+if "chat_popup_minimized" not in st.session_state:
+    st.session_state["chat_popup_minimized"] = False
 if "consistency_data" not in st.session_state:
     st.session_state["consistency_data"] = None
 
+# 플로팅 팝업창 폭 동적 설정 (기본 620px / 크게 보기 920px)
+popup_width_css = "min(920px, 72vw)" if st.session_state.get("chat_popup_wide") else "min(620px, 48vw)"
+
+st.markdown(
+    f"""
+    <style>
+    :root {{ --primary-color: #059669 !important; }}
+    span[data-baseweb="tag"],
+    div[data-baseweb="select"] span[data-baseweb="tag"],
+    [data-testid="stMultiSelect"] span[data-baseweb="tag"] {{
+        background-color: #059669 !important;
+        color: #ffffff !important;
+        border-radius: 6px !important;
+        font-weight: 600 !important;
+    }}
+    span[data-baseweb="tag"] span {{ color: #ffffff !important; }}
+    div[role="radiogroup"] label > div:first-child {{ border-color: #059669 !important; }}
+    div[role="radiogroup"] label[data-baseweb="radio"] > div:first-child {{
+        background-color: #059669 !important;
+        border-color: #059669 !important;
+    }}
+    button[kind="primary"], [data-testid="stBaseButton-primary"] {{
+        background-color: #059669 !important;
+        border-color: #059669 !important;
+        color: white !important;
+    }}
+    button[kind="primary"]:hover, [data-testid="stBaseButton-primary"]:hover {{
+        background-color: #047857 !important;
+        border-color: #047857 !important;
+    }}
+
+    /* 🗗 배경 스크롤(1·2·3번 확인)을 절대 막지 않는 우측 고정 플로팅 팝업 채팅창 스타일 */
+    div[data-testid="stVerticalBlock"]:has(#floating-chat-marker):not(:has(div[data-testid="stVerticalBlock"] #floating-chat-marker)) {{
+        position: fixed !important;
+        bottom: 22px !important;
+        right: 26px !important;
+        width: {popup_width_css} !important;
+        max-height: 86vh !important;
+        overflow-y: auto !important;
+        overflow-x: hidden !important;
+        background-color: #ffffff !important;
+        border: 2.5px solid #059669 !important;
+        border-radius: 16px !important;
+        box-shadow: 0 20px 50px rgba(0, 0, 0, 0.28) !important;
+        z-index: 999990 !important;
+        padding: 14px 18px 18px 18px !important;
+    }}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 
 def _build_compact_sample_str(df: pd.DataFrame, max_rows: int = 10) -> str:
-    """
-    AI에게 넘길 때 긴 절차서(Procedure 등) 원문 때문에 모델이 샘플 행을 그대로 복사하다가
-    토큰 제한으로 끊기는 현상을 막기 위해, 각 셀을 42자 이내로 요약한 대표 10건만 전달합니다.
-    """
     if df is None or len(df) == 0:
         return "샘플 없음"
     sub = df.head(max_rows).copy()
@@ -127,6 +149,9 @@ def reset_all_inputs_and_files():
     st.session_state["pipeline_logs"] = []
     st.session_state["current_file_sig"] = ""
     st.session_state["chat_history"] = []
+    st.session_state["chat_popup_mode"] = False
+    st.session_state["chat_popup_wide"] = False
+    st.session_state["chat_popup_minimized"] = False
     st.session_state["consistency_data"] = None
     for k in ["nl_q_input", "kw_q_input"]:
         if k in st.session_state:
@@ -619,7 +644,7 @@ def render_chat_messenger_ui(
     aux_sheets: dict[str, pd.DataFrame],
     defect_threshold: float,
     key_suffix: str = "inline",
-    chat_height: int = 390,
+    chat_height: int = 380,
 ):
     stat_summary_str = "\n\n".join(
         f"■ {k}\n{v.to_string(index=False)}"
@@ -633,8 +658,8 @@ def render_chat_messenger_ui(
     with top_c1:
         mem_badge = "✅ 3번 리포트 + 기초통계 연동됨" if has_prev_rep else "📊 1·2번 조회 데이터·통계 연동됨"
         st.markdown(
-            f'<div style="background:#ecfdf5; border:1px solid #10b981; border-radius:8px; padding:8px 12px; font-size:0.84rem; color:#065f46; font-weight:600;">'
-            f'🧠 <b>데이터 메모리:</b> {filter_badge} (기준 {defect_threshold}%) | {mem_badge}'
+            f'<div style="background:#ecfdf5; border:1px solid #10b981; border-radius:8px; padding:8px 12px; font-size:0.82rem; color:#065f46; font-weight:600;">'
+            f'🧠 <b>메모리:</b> {filter_badge} (기준 {defect_threshold}%) | {mem_badge}'
             f'</div>',
             unsafe_allow_html=True,
         )
@@ -650,17 +675,18 @@ def render_chat_messenger_ui(
     with top_c3:
         if st.button("🗑️ 대화 비우기", key=f"clear_chat_{key_suffix}", use_container_width=True):
             st.session_state["chat_history"] = []
+            st.rerun()
 
     st.caption("⚡ **빠른 질문 칩 (클릭 시 현재 조회된 데이터 기준으로 바로 답변합니다):**")
     chip_c1, chip_c2, chip_c3, chip_c4 = st.columns(4)
     triggered_q = None
-    if chip_c1.button("🔍 미기입·주의 행만 표로 보기", key=f"chip1_{key_suffix}", use_container_width=True):
+    if chip_c1.button("🔍 미기입·주의 행만 표로", key=f"chip1_{key_suffix}", use_container_width=True):
         triggered_q = f"현재 조회된 {len(target_df)}건 중에서 미기입(빈칸) 또는 N/A, 주의가 필요한 항목들이 어떤 컬럼에 몇 건 있는지 요약해주고 해당 행을 보여줘."
-    if chip_c2.button("📊 상위 집중 항목 3개 요약", key=f"chip2_{key_suffix}", use_container_width=True):
+    if chip_c2.button("📊 상위 집중 항목 요약", key=f"chip2_{key_suffix}", use_container_width=True):
         triggered_q = f"현재 조회된 {len(target_df)}건에서 사내 기준({defect_threshold}%) 이상이거나 가장 비중이 큰 상위 3개 항목의 건수와 비중을 요약해줘."
     if chip_c3.button("📋 분석 데이터 핵심 5줄 요약", key=f"chip3_{key_suffix}", use_container_width=True):
         triggered_q = f"현재 분석한 {len(target_df)}건 데이터의 핵심 현황과 주요 분포 특징, 확인 필요 사항을 한눈에 파악할 수 있게 5줄 이내로 깔끔하게 요약해줘."
-    if chip_c4.button("🧪 예외·경계값 테스트 3건 추천", key=f"chip4_{key_suffix}", use_container_width=True):
+    if chip_c4.button("🧪 예외·경계값 테스트 추천", key=f"chip4_{key_suffix}", use_container_width=True):
         triggered_q = f"현재 조회된 {len(target_df)}건 데이터의 주요 기능을 바탕으로 추가로 보강하면 좋을 예외 처리(Negative) 또는 경계값 테스트 시나리오 3가지만 추천해줘."
 
     user_input = st.chat_input(
@@ -698,8 +724,7 @@ def render_chat_messenger_ui(
                     st.dataframe(style_dataframe_with_colors(msg["matched_df"]), use_container_width=True, hide_index=True)
 
 
-@st.dialog("💬 대화형 후속 질문 채팅방 (팝업 모드 — 2번 그래프 차트 & 1·3번 메모리 내장)", width="large")
-def show_chat_assistant_popup(
+def render_floating_popup_chat_window(
     target_df: pd.DataFrame,
     raw_df: pd.DataFrame,
     active_filter_text: str,
@@ -707,46 +732,74 @@ def show_chat_assistant_popup(
     defect_threshold: float,
 ):
     """
-    팝업창 모드:
-    - 우측 상단 X 버튼으로 그냥 닫아도 하단 4번 채팅방이 절대 일시중지 상태로 잠기지 않습니다!
-    - 팝업창 안에서도 [📈 2번 다차원 시각화 그래프 차트]를 바로 펼쳐볼 수 있습니다.
+    [핵심 해결]
+    배경 화면(1·2·3번)의 마우스 휠 스크롤을 막지 않는 우측 고정 플로팅 팝업 채팅창입니다.
+    - 이 팝업창이 떠 있는 동안 4번 섹션에는 '⏸️ 팝업 채팅창 모드 실행 중' 상태가 표시되며,
+    - 사용자는 마우스 휠을 굴려 1번·2번(그래프 차트)·3번(리포트)을 자유롭게 위아래로 왔다 갔다 보면서 대화할 수 있습니다!
     """
-    st.caption("💡 **팝업 안에서 바로 `2번 그래프 차트`와 `1·3번 결과`를 함께 펼쳐보며 대화할 수 있습니다. (우측 상단 `X`를 눌러 닫으면 하단 4번 채팅방에 대화 내역이 그대로 이어집니다.)**")
+    with st.container():
+        # CSS :has(#floating-chat-marker)가 이 컨테이너만 우측 플로팅 팝업창으로 고정시킵니다.
+        st.markdown('<div id="floating-chat-marker"></div>', unsafe_allow_html=True)
 
-    with st.expander(f"📈 팝업 안에서 [2번 다차원 그래프 차트] · [1번 데이터 표({len(target_df)}건)] · [3번 AI 리포트] 바로 보기 (클릭)", expanded=False):
-        ref_t_chart, ref_t1, ref_t2, ref_t3 = st.tabs([
-            "📈 2️⃣ 다차원 그래프 차트",
-            f"📋 1️⃣ 조회된 데이터 표 ({len(target_df)}건)",
-            "📊 2️⃣ 한글 기초통계 집계표",
-            "📝 3️⃣ 직전 AI 분석 리포트",
-        ])
-        with ref_t_chart:
-            render_smart_charts(target_df, key_prefix="popup_chat_chart", defect_threshold=defect_threshold)
-        with ref_t1:
-            st.dataframe(style_dataframe_with_colors(target_df), use_container_width=True, hide_index=True, height=220)
-        with ref_t2:
-            k_tables = build_korean_stat_tables(target_df, aux_sheets=aux_sheets, threshold=defect_threshold)
-            for t_name, t_df in k_tables.items():
-                st.markdown(f"**■ {t_name}**")
-                st.dataframe(style_dataframe_with_colors(t_df), use_container_width=True, hide_index=True)
-        with ref_t3:
-            saved_res = st.session_state.get("saved_results", {})
-            if saved_res:
-                for m_k, r_v in saved_res.items():
-                    st.markdown(f"**■ {MODEL_LABELS.get(m_k, m_k)}**")
-                    st.markdown(r_v.get("report", ""))
-            else:
-                st.info("아직 3번 에이전트 정밀 분석을 실행하지 않았습니다. (실행 전에도 1·2번 데이터로 모든 채팅 질문이 가능합니다.)")
+        # 팝업 상단 타이틀 바 및 제어 버튼 (크게/작게, 접기/펼치기, 닫기)
+        h_c1, h_c2, h_c3, h_c4 = st.columns([2.2, 0.75, 0.65, 0.75])
+        with h_c1:
+            st.markdown(
+                f'<div style="background:#059669; color:white; padding:7px 12px; border-radius:8px; font-weight:700; font-size:0.9rem;">'
+                f'💬 팝업 채팅창 (조회 {len(target_df):,}건 연동 중)'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+        with h_c2:
+            size_label = "🗕 기본폭" if st.session_state.get("chat_popup_wide") else "🔍 폭확대"
+            if st.button(size_label, key="float_toggle_wide_btn", use_container_width=True):
+                st.session_state["chat_popup_wide"] = not st.session_state.get("chat_popup_wide", False)
+                st.rerun()
+        with h_c3:
+            min_label = "➕ 펼치기" if st.session_state.get("chat_popup_minimized") else "➖ 접기"
+            if st.button(min_label, key="float_toggle_min_btn", use_container_width=True):
+                st.session_state["chat_popup_minimized"] = not st.session_state.get("chat_popup_minimized", False)
+                st.rerun()
+        with h_c4:
+            if st.button("✖ 닫기", key="float_close_popup_btn", type="primary", use_container_width=True):
+                st.session_state["chat_popup_mode"] = False
+                st.session_state["chat_popup_minimized"] = False
+                st.rerun()
 
-    render_chat_messenger_ui(
-        target_df=target_df,
-        raw_df=raw_df,
-        active_filter_text=active_filter_text,
-        aux_sheets=aux_sheets,
-        defect_threshold=defect_threshold,
-        key_suffix="popup_modal",
-        chat_height=400,
-    )
+        if st.session_state.get("chat_popup_minimized"):
+            st.caption("💡 팝업 채팅창이 최소화되어 있습니다. 우측 상단 **[➕ 펼치기]**를 누르면 대화창이 열립니다.")
+            return
+
+        st.caption("✨ **배경 화면 잠금 없음:** 이 팝업창을 띄워둔 채로 **마우스 휠을 굴려 뒤쪽 1·2·3번 화면을 자유롭게 위아래로 스크롤**하며 볼 수 있습니다!")
+
+        with st.expander(f"📈 팝업 안에서도 [2번 그래프 차트] · [1번 표({len(target_df)}건)] · [3번 리포트] 펼쳐보기 (클릭)", expanded=False):
+            p_t1, p_t2, p_t3 = st.tabs([
+                "📈 2️⃣ 다차원 그래프 차트",
+                f"📋 1️⃣ 조회된 표 ({len(target_df)}건)",
+                "📝 3️⃣ 직전 AI 리포트",
+            ])
+            with p_t1:
+                render_smart_charts(target_df, key_prefix="float_popup_chart", defect_threshold=defect_threshold)
+            with p_t2:
+                st.dataframe(style_dataframe_with_colors(target_df), use_container_width=True, hide_index=True, height=200)
+            with p_t3:
+                saved_res = st.session_state.get("saved_results", {})
+                if saved_res:
+                    for m_k, r_v in saved_res.items():
+                        st.markdown(f"**■ {MODEL_LABELS.get(m_k, m_k)}**")
+                        st.markdown(r_v.get("report", ""))
+                else:
+                    st.info("아직 3번 에이전트 분석 실행 전입니다.")
+
+        render_chat_messenger_ui(
+            target_df=target_df,
+            raw_df=raw_df,
+            active_filter_text=active_filter_text,
+            aux_sheets=aux_sheets,
+            defect_threshold=defect_threshold,
+            key_suffix="floating_popup",
+            chat_height=310,
+        )
 
 
 # =====================================================================
@@ -1027,7 +1080,6 @@ def render_agent_analysis_section(
                 f"■ {k}\n{v.to_string(index=False)}"
                 for k, v in build_korean_stat_tables(target_df, aux_sheets=aux_sheets, threshold=defect_threshold).items()
             )
-            # 중요: 40건 전체 원문 대신 10건 요약 샘플만 전달하여 Groq 등이 샘플을 그대로 복사하다가 끊기는 현상 방지!
             compact_sample_str = _build_compact_sample_str(target_df, max_rows=10)
 
             data_info = (
@@ -1200,7 +1252,7 @@ def render_agent_analysis_section(
 
 # =====================================================================
 # 🌟 4️⃣ 대화형 후속 질문 채팅방(A) & 3회 반복 상세 차이점 검증기(C)
-# (일시중지 잠김 버그 완전 제거 + 좌우 분할 나란히 보기 + 팝업 내 2번 그래프 차트 포함!)
+# (좌우분할 완전 제거 + 배경 1·2·3번 자유 스크롤 가능한 플로팅 팝업창 탑재!)
 # =====================================================================
 @st.fragment
 def render_advanced_extensions_hub(
@@ -1213,65 +1265,47 @@ def render_advanced_extensions_hub(
     st.subheader("4️⃣ 대화형 후속 질문 채팅방 (Chatflow) & 3회 반복 일관성 상세 검증기")
 
     tab_a, tab_c = st.tabs([
-        "💬 [기능 A] 대화형 후속 질문 채팅방 (기본 모드 · 좌우 분할 차트 동시보기 · 팝업창 지원)",
+        "💬 [기능 A] 대화형 후속 질문 채팅방 (팝업창 모드 시 1·2·3번 자유 스크롤 지원)",
         "🔁 [기능 C] 3회 반복 실행 '일관성 vs 차이점' 상세 비교 (파트회의 공유용 워드 .docx 추출)",
     ])
 
     # -----------------------------------------------------------------
-    # 💬 [기능 A] 잠김 버그 없이 2번 그래프 차트와 함께 보는 대화형 채팅방
+    # 💬 [기능 A] 플로팅 팝업 채팅창 (켜면 4번은 '팝업 실행 중' 표시 + 1·2·3번 마우스 휠 자유 스크롤!)
     # -----------------------------------------------------------------
     with tab_a:
-        ctrl_c1, ctrl_c2 = st.columns([2.7, 1.3])
-        with ctrl_c1:
-            layout_mode = st.radio(
-                "🖥️ 채팅방 화면 배치 방식 선택:",
-                options=[
-                    "💬 기본 채팅창 모드",
-                    "🖥️ 좌우 분할 모드 (왼쪽: 2번 그래프 차트·3번 리포트 / 오른쪽: 실시간 채팅방 나란히 보기)",
-                ],
-                index=0,
-                horizontal=True,
-                key="chat_layout_mode_radio",
+        if st.session_state.get("chat_popup_mode", False):
+            # 1) 4번 본래 자리에는 '현재 팝업 채팅창 모드가 실행 중'임을 명확히 표시하고 복귀 버튼 제공
+            st.warning(
+                "⏸️ **현재 [팝업 채팅창 모드]가 실행 중이어서 하단 4번 채팅방은 일시 중지되었습니다.**\n\n"
+                "- 화면 우측에 떠 있는 **팝업 채팅창**을 켜둔 채로 **마우스 스크롤 휠을 위아래로 자유롭게 굴려 1번(조회 표) · 2번(그래프 차트) · 3번(AI 리포트)을 마음대로 왔다 갔다 하며 확인**하실 수 있습니다!\n"
+                "- 팝업창 우측 상단의 **[✖ 닫기]** 또는 아래 버튼을 누르면 즉시 원래 4번 채팅방으로 돌아옵니다."
             )
-        with ctrl_c2:
-            st.markdown("<div style='margin-top:8px;'></div>", unsafe_allow_html=True)
-            if st.button("🗗 큰 팝업창으로 채팅방 열기 (차트 내장)", key="open_popup_chat_clean_btn", type="primary", use_container_width=True):
-                show_chat_assistant_popup(target_df, raw_df, active_filter_text, aux_sheets, defect_threshold)
+            if st.button("🔽 팝업 채팅창 닫고 여기(하단 4번 채팅방)로 복귀하기", key="return_inline_chat_btn", type="primary", use_container_width=True):
+                st.session_state["chat_popup_mode"] = False
+                st.session_state["chat_popup_minimized"] = False
+                st.rerun()
 
-        if layout_mode.startswith("🖥️"):
-            # 좌우 분할 모드: 화면을 가리지 않고 왼쪽에는 2번 그래프 차트/표/3번 리포트, 오른쪽에는 채팅방을 나란히 표시!
-            split_left, split_right = st.columns([1.15, 1.0])
-            with split_left:
-                st.markdown("##### 📊 왼쪽 화면: 2번 그래프 차트 · 1번 표 · 3번 리포트 동시 확인")
-                s_tab1, s_tab2, s_tab3 = st.tabs([
-                    "📈 2️⃣ 다차원 그래프 차트",
-                    f"📋 1️⃣ 조회된 표 ({len(target_df)}건)",
-                    "📝 3️⃣ AI 분석 리포트",
-                ])
-                with s_tab1:
-                    render_smart_charts(target_df, key_prefix="split_left_chart", defect_threshold=defect_threshold)
-                with s_tab2:
-                    st.dataframe(style_dataframe_with_colors(target_df), use_container_width=True, hide_index=True, height=420)
-                with s_tab3:
-                    saved_res = st.session_state.get("saved_results", {})
-                    if saved_res:
-                        for m_k, r_v in saved_res.items():
-                            st.markdown(f"**■ {MODEL_LABELS.get(m_k, m_k)}**")
-                            st.markdown(r_v.get("report", ""))
-                    else:
-                        st.info("아직 3번 에이전트 정밀 분석을 실행하지 않았습니다.")
-            with split_right:
-                st.markdown("##### 💬 오른쪽 화면: 실시간 후속 질문 채팅방")
-                render_chat_messenger_ui(
-                    target_df=target_df,
-                    raw_df=raw_df,
-                    active_filter_text=active_filter_text,
-                    aux_sheets=aux_sheets,
-                    defect_threshold=defect_threshold,
-                    key_suffix="split_inline",
-                    chat_height=430,
-                )
+            # 2) 화면을 가리지 않고 우측에 떠 있는 플로팅 팝업 채팅창 렌더링 (배경 스크롤 100% 가능!)
+            render_floating_popup_chat_window(
+                target_df=target_df,
+                raw_df=raw_df,
+                active_filter_text=active_filter_text,
+                aux_sheets=aux_sheets,
+                defect_threshold=defect_threshold,
+            )
         else:
+            pop_c1, pop_c2 = st.columns([2.6, 1.4])
+            with pop_c1:
+                st.caption(
+                    f"💡 **현재 1번 조회 데이터({len(target_df):,}건) 및 3번 리포트와 100% 연동된 대화방입니다.** "
+                    "우측 버튼을 누르면 **팝업 채팅창**이 뜨며, 팝업을 띄워둔 채로 **1·2·3번 화면을 자유롭게 위아래로 스크롤**할 수 있습니다."
+                )
+            with pop_c2:
+                if st.button("🗗 팝업 채팅창 모드로 열기 (1·2·3번 자유 스크롤)", key="open_floating_popup_btn", type="primary", use_container_width=True):
+                    st.session_state["chat_popup_mode"] = True
+                    st.session_state["chat_popup_minimized"] = False
+                    st.rerun()
+
             render_chat_messenger_ui(
                 target_df=target_df,
                 raw_df=raw_df,
@@ -1608,6 +1642,7 @@ if uploaded_files:
         st.session_state["saved_results"] = {}
         st.session_state["pipeline_logs"] = []
         st.session_state["chat_history"] = []
+        st.session_state["chat_popup_mode"] = False
         st.session_state["consistency_data"] = None
 
 
