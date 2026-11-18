@@ -1,6 +1,7 @@
 # app.py
 import os
 import re
+import sqlite3
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -99,7 +100,6 @@ if "uploader_key" not in st.session_state:
 
 
 def reset_all_inputs_and_files():
-    """업로드된 모든 파일과 입력 검색어, AI 분석 결과를 클릭 한 번으로 전부 초기화합니다."""
     st.session_state["uploader_key"] += 1
     st.session_state["saved_results"] = {}
     st.session_state["last_analyzed_df"] = None
@@ -112,7 +112,6 @@ def reset_all_inputs_and_files():
 
 
 def get_file_type_badge(filename: str) -> tuple[str, str]:
-    """파일 확장자에 따라 (분류 그룹명, 아이콘 배지)를 반환합니다."""
     ext = Path(filename).suffix.lower()
     if ext == ".xlsx":
         return "📊 엑셀 (.xlsx)", f"📊 [Excel] {filename}"
@@ -204,13 +203,23 @@ def style_dataframe_with_colors(df: pd.DataFrame):
 
 
 def build_smart_sql(nl_query: str, df: pd.DataFrame, table_name: str) -> str:
+    """
+    [고도화된 자연어 → SQLite SQL 자동 변환기]
+    1. 비어 있거나 '전체조회' 입력 시: LIMIT 없이 100% 전체 데이터 조회
+    2. 건수 제한('상위 30건', '100건만'): LIMIT N 자동 적용
+    3. 미기입/빈칸/미실행 검색('미기입만', '빈칸 조회', 'N/A만', '미실행만'): '-' / 'N/A' / 'Not Run' 조건 자동 생성
+    4. 제외 조건('Linux 빼고', 'N/A 제외'): NOT LIKE 조건 적용
+    5. 범주형 정확 매칭 + 긴 문장(Title/Procedure 등) 내 부분 키워드('VP9', '결제', '쿠폰' 등) 자동 탐색
+    6. 수치 비교('생산량 1200 이상', '불량수 20 초과') 및 정렬('불량수 높은 순', '생산량 낮은 순') 지원
+    """
     if not nl_query or not nl_query.strip():
         return f"SELECT * FROM {table_name};"
 
     q = nl_query.strip()
-    if q.replace(" ", "") in ("전체", "전체조회", "전체데이터", "모두조회", "다보여줘", "전체보여줘", "all"):
+    if q.replace(" ", "").lower() in ("전체", "전체조회", "전체데이터", "모두조회", "다보여줘", "전체보여줘", "all"):
         return f"SELECT * FROM {table_name};"
 
+    # 1. 건수 제한(LIMIT N) 추출
     limit_val = None
     limit_match = re.search(r"(?:상위\s*|최대\s*|limit\s*)?(\d+)\s*(?:건|개|행|줄)(?:\s*만|\s*조회|\s*보여|\s*출력)?", q, re.IGNORECASE)
     if not limit_match:
@@ -221,19 +230,62 @@ def build_smart_sql(nl_query: str, df: pd.DataFrame, table_name: str) -> str:
     else:
         q_without_limit = q
 
-    rem_cleaned = re.sub(r"(전체|조회|해줘|보여줘|출력|데이터|만|에서|중)", "", q_without_limit).strip()
-    if not rem_cleaned and limit_val is not None:
-        return f"SELECT * FROM {table_name} LIMIT {limit_val};"
+    # 2. 정렬(ORDER BY) 조건 감지
+    order_clause = ""
+    num_cols = df.select_dtypes(include=["number"]).columns.tolist()
+    if any(k in q_without_limit for k in ["높은 순", "높은순", "많은 순", "많은순", "큰 순", "내림차순", "낮은 순", "낮은순", "적은 순", "오름차순", "정렬"]):
+        is_asc = any(k in q_without_limit for k in ["낮은", "적은", "작은", "오름차순", "asc"])
+        direction = "ASC" if is_asc else "DESC"
+        sort_col = next((c for c in df.columns if str(c).lower() in q_without_limit.lower()), None)
+        if sort_col is None and num_cols:
+            for c in num_cols:
+                if ("불량" in q_without_limit and "불량" in str(c)) or ("생산" in q_without_limit and "생산" in str(c)):
+                    sort_col = c
+                    break
+            sort_col = sort_col or num_cols[0]
+        if sort_col:
+            order_clause = f' ORDER BY "{sort_col}" {direction}'
 
+    rem_cleaned = re.sub(
+        r"(전체|조회|해줘|보여줘|찾아줘|출력|데이터|만|에서|중|높은\s*순|많은\s*순|낮은\s*순|적은\s*순|내림차순|오름차순|정렬)",
+        "",
+        q_without_limit,
+    ).strip()
+    if not rem_cleaned and (limit_val is not None or order_clause):
+        sql = f"SELECT * FROM {table_name}{order_clause}"
+        return f"{sql} LIMIT {limit_val};" if limit_val else f"{sql};"
+
+    # 3. 배경색 키워드 검색
     if any(k in q_without_limit for k in ["빨강", "빨간", "초록", "노랑", "배경", "색상", "색깔"]):
         color_kw = "빨강" if ("빨강" in q_without_limit or "빨간" in q_without_limit) else (
             "초록" if "초록" in q_without_limit else ("노랑" if "노랑" in q_without_limit else "강조")
         )
         or_likes = [f'"{col}" LIKE \'%{color_kw}%\'' for col in df.columns]
-        sql = f"SELECT * FROM {table_name} WHERE " + " OR ".join(or_likes)
+        sql = f"SELECT * FROM {table_name} WHERE (" + " OR ".join(or_likes) + f"){order_clause}"
         return f"{sql} LIMIT {limit_val};" if limit_val else f"{sql};"
 
+    # 4. 미기입 / 빈칸 / 공란 / 미실행 / N/A 전용 검색
+    if any(k in q_without_limit.lower() for k in ["미기입", "빈칸", "공란", "미실행", "not run", "n/a"]):
+        target_c = next((c for c in df.columns if str(c).lower() in q_without_limit.lower()), None)
+        check_cols = [target_c] if target_c else [
+            c for c in df.columns if str(c).lower() not in ("_polarion", "id", "tc id", "번호", "시트명", "파일명")
+        ]
+        conds = []
+        if any(k in q_without_limit.lower() for k in ["미실행", "not run"]):
+            conds = [f'UPPER("{c}") LIKE \'%NOT RUN%\' OR "{c}" LIKE \'%미실행%\'' for c in check_cols]
+        elif "n/a" in q_without_limit.lower():
+            conds = [f'UPPER("{c}") = \'N/A\'' for c in check_cols]
+        else:
+            conds = [f'"{c}" = \'-\' OR "{c}" = \'\' OR "{c}" LIKE \'%[빈칸%\'' for c in check_cols]
+        sql = f"SELECT * FROM {table_name} WHERE (" + " OR ".join(conds) + f"){order_clause}"
+        return f"{sql} LIMIT {limit_val};" if limit_val else f"{sql};"
+
+    # 제외('빼고', '제외', '아닌') 여부 판별
+    is_negation = any(k in q_without_limit for k in ["빼고", "제외", "아닌", "말고"])
+
+    # 5. 범주형 컬럼 값 매칭
     col_matches: dict[str, list[str]] = {}
+    matched_tokens_lower: set[str] = set()
     str_cols = df.select_dtypes(include=["object", "category"]).columns.tolist()
     for col in str_cols:
         matched_vals = []
@@ -243,18 +295,22 @@ def build_smart_sql(nl_query: str, df: pd.DataFrame, table_name: str) -> str:
                 continue
             if val_clean.lower() in q_without_limit.lower() or f"{val_clean}{col}".lower() in q_without_limit.lower():
                 matched_vals.append(val_clean)
+                matched_tokens_lower.add(val_clean.lower())
         if matched_vals:
             col_matches[col] = list(dict.fromkeys(matched_vals))
 
     where_clauses = []
     for col, vals in col_matches.items():
-        if len(vals) == 1:
+        if is_negation:
+            and_not = " AND ".join(f'"{col}" NOT LIKE \'%{v}%\'' for v in vals)
+            where_clauses.append(f"({and_not})")
+        elif len(vals) == 1:
             where_clauses.append(f'"{col}" LIKE \'%{vals[0]}%\'')
         else:
             or_part = " OR ".join(f'"{col}" LIKE \'%{v}%\'' for v in vals)
             where_clauses.append(f"({or_part})")
 
-    num_cols = df.select_dtypes(include=["number"]).columns.tolist()
+    # 6. 수치형 컬럼 범위 조건 매칭
     nums = re.findall(r"\d+(?:\.\d+)?", q_without_limit)
     if nums and num_cols:
         target_num = float(nums[0])
@@ -284,9 +340,43 @@ def build_smart_sql(nl_query: str, df: pd.DataFrame, table_name: str) -> str:
                 op = "="
             where_clauses.append(f'"{target_col}" {op} {num_str}')
 
+    # 7. [신규 보강] 긴 텍스트(Title, Procedure 등) 안의 부분 키워드 검색 폴백
+    # 예: "VP9 조회해줘", "결제 찾아줘", "선물하기랑 장바구니" 입력 시 해당 단어가 들어 있는 컬럼을 찾아 LIKE 검색!
+    if not where_clauses and str_cols:
+        stop_words = {
+            "전체", "조회", "해줘", "보여줘", "찾아줘", "검색", "데이터", "항목", "행", "열", "에서", "만",
+            "그리고", "또는", "이나", "이랑", "랑", "과", "와", "포함", "있는", "없는", "제외", "빼고", "아닌", "말고",
+            "높은", "낮은", "많은", "적은", "순", "정렬", "이상", "이하", "초과", "미만",
+        }
+        raw_tokens = re.findall(r"[A-Za-z0-9_.+-]{2,}|[가-힣]{2,}", q_without_limit)
+        search_kws = []
+        for tk in raw_tokens:
+            # 한국어 조사(만, 은, 는, 이, 가, 을, 를, 랑, 이랑) 제거
+            tk_clean = re.sub(r"(이랑|으로|에서|부터|까지|만|은|는|이|가|을|를|랑|도)$", "", tk).strip()
+            if len(tk_clean) >= 2 and tk_clean.lower() not in stop_words and not tk_clean.isdigit():
+                if tk_clean.lower() not in [ str(c).lower() for c in df.columns ]:
+                    search_kws.append(tk_clean)
+
+        for kw in list(dict.fromkeys(search_kws))[:3]:
+            hit_cols = [
+                col for col in str_cols
+                if df[col].astype(str).str.contains(re.escape(kw), case=False, na=False).any()
+            ]
+            target_cols = hit_cols if hit_cols else str_cols[:5]
+            if is_negation:
+                where_clauses.append("(" + " AND ".join(f'"{c}" NOT LIKE \'%{kw}%\'' for c in target_cols) + ")")
+            else:
+                where_clauses.append("(" + " OR ".join(f'"{c}" LIKE \'%{kw}%\'' for c in target_cols) + ")")
+
     sql = f"SELECT * FROM {table_name}"
     if where_clauses:
-        sql += " WHERE " + " AND ".join(where_clauses)
+        join_op = " AND " if is_negation or len(where_clauses) == 1 else " OR "
+        # 서로 다른 컬럼 매칭이 복수 개일 때는 기본적으로 AND, 자유 키워드 복수 검색일 때는 OR 지원
+        if col_matches or nums:
+            sql += " WHERE " + " AND ".join(where_clauses)
+        else:
+            sql += " WHERE " + join_op.join(where_clauses)
+    sql += order_clause
     if limit_val is not None:
         sql += f" LIMIT {limit_val}"
     sql += ";"
@@ -685,7 +775,7 @@ def render_agent_analysis_section(
 
         top_c1, top_c2, top_c3 = st.columns([1.6, 1.2, 1.2])
         with top_c1:
-            st.caption("👆 **우측 워드(.docx) 추출 시 [1페이지: 전체 종합 요약표] + [2페이지~: AI별 강제 쪽 나누기 상세본]으로 출력됩니다.**")
+            st.caption("👆 **우측 워드(.docx) 추출 시 [1페이지: 전체 종합 요약표] + [2페이지~: AI별 강제 쪽 나누기 상세본(빈 페이지 0건)]으로 출력됩니다.**")
         with top_c2:
             st.download_button(
                 label="📚 전체 모델 종합 비교 엑셀 추출 (.xlsx)",
@@ -778,7 +868,6 @@ sheet_counts = {}
 active_file_name = ""
 
 if uploaded_files:
-    # 1. 확장자(유형)별로 업로드된 파일들을 자동 분류하여 묶어서 표시
     grouped_files: dict[str, list] = {}
     file_badge_map: dict[str, str] = {}
     for f_obj in uploaded_files:
@@ -791,7 +880,6 @@ if uploaded_files:
         active_file_name = target_upload.name
         st.caption(f"✅ 선택된 파일: **{file_badge_map[target_upload.name]}**")
     else:
-        # 확장자 분류별 묶음 현황 배너 출력
         group_summary_parts = [
             f"**{cat_name}** `{len(f_list)}개` ({', '.join(f.name for f in f_list)})"
             for cat_name, f_list in grouped_files.items()
@@ -864,7 +952,6 @@ if uploaded_files:
                         st.caption("💡 서로 다른 컬럼 구조의 파일들이 함께 선택되어 '파일명' 기준으로 통합 병합되었습니다.")
                     raw_df = pd.concat(merged_dfs, ignore_index=True) if merged_dfs else pd.DataFrame()
                     if len(raw_df) > 0:
-                        import sqlite3
                         with sqlite3.connect(DB_PATH) as conn:
                             raw_df.to_sql(TABLE_NAME, conn, if_exists="replace", index=False)
                     aux_sheets = merged_aux
@@ -901,7 +988,7 @@ if uploaded_files:
 
 
 # =====================================================================
-# ⚙️ 사이드바 설정 (상시 노출되는 초기화 버튼 포함)
+# ⚙️ 사이드바 설정
 # =====================================================================
 with st.sidebar:
     st.header("⚙️ 실행 및 비교 모델 설정")
@@ -931,7 +1018,7 @@ with st.sidebar:
         )
 
     st.divider()
-    st.subheader("🎚️ 사내 품질 기준값 설정")
+    st.subheader("🎚️ 사내 품질 기준값 설정 (W47)")
     defect_threshold = st.slider(
         "사내 관리 기준값 / 임계치 (%)",
         min_value=0.5,
@@ -994,7 +1081,7 @@ else:
     with tab_nl:
         st.caption(
             f"테이블(`{TABLE_NAME}`) 컬럼: `{list(raw_df.columns)}` | "
-            "💡 **비워두거나 '전체조회' 입력 시 전체 건수(100% 전체 행)가 조회**되며, `'상위 50건'`, `'High만'` 등 조건 입력도 가능합니다."
+            "💡 입력 예시: **`전체조회`**, **`상위 30건`**, **`VP9 조회`**, **`미기입만 조회`**, **`Linux 빼고`**, **`불량수 높은 순`**"
         )
         nl_question = st.text_input("조회 조건을 자연어로 입력하세요 (비워두면 제한 없이 전체 데이터를 조회합니다):", value="", key="nl_q_input")
         auto_sql = build_smart_sql(nl_question, raw_df, TABLE_NAME)
