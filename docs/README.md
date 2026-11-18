@@ -1,12 +1,10 @@
 # 📊 자연어 기반 사내 데이터·문서 통합 분석 AI Agent (`data_analysis_agent`)
 
-사내 생산·품질·검증 데이터(**CSV, 다중 시트 Excel**)와 일반 업무 문서(**Word `.docx`, `.txt`**)를 업로드하면 **① 확장자별 자동 분류 및 핵심 시트·보조 시트·셀 배경색을 스마트 분리하여 로컬 SQLite DB를 자동 구축**하고, **② 양식 자동 검증(Validation) 및 사내 품질 기준값(`%`)에 연동된 자연어 SQL 조회·가로형 TOP 순위 다차원 시각화**를 수행하며, **③ 사내 보안용 Local LLM(Ollama 정밀 모드)과 외부 Cloud AI(Groq, Gemini)를 동시에 병렬 비교하여 마스터 엑셀(`.xlsx`), 페이지 분리형 워드(`.docx`), SQL 덤프(`.sql`)를 자동 생성**하는 실무형 AI 에이전트입니다.
+사내 생산·품질·검증 데이터(**CSV, 다중 시트 Excel**)와 일반 업무 문서(**Word `.docx`, `.txt`**)를 업로드하면 **① 확장자별 자동 분류 및 핵심 시트·보조 시트·셀 배경색을 스마트 분리하여 로컬 SQLite DB를 자동 구축**하고, **② 양식 자동 검증(Validation) 및 사내 품질 기준값(`%`)에 연동된 자연어 SQL 조회·가로형 TOP 순위 다차원 시각화**를 수행하며, **③ 사내 보안용 Local LLM(Ollama 정밀 모드)과 외부 Cloud AI(Groq, Gemini)를 동시에 병렬 비교하여 마스터 엑셀(`.xlsx`), 페이지 분리형 워드(`.docx`), 실시간 팝업 채팅방(Chatflow)을 제공**하는 실무형 AI 에이전트입니다.
 
 ---
 
-## 🔄 1. 한눈에 보는 파이썬(`.py`) 파일 간 실행 흐름도 (W47 최신 아키텍처)
-
-> 💡 GitHub에서 열면 아래 Mermaid 코드가 **자동으로 화살표 플로우차트**로 렌더링됩니다.
+## 🔄 1. 한눈에 보는 파이썬(`.py`) 파일 간 실행 흐름도 (W47 최종 아키텍처)
 
 ```mermaid
 flowchart TB
@@ -15,7 +13,7 @@ flowchart TB
     subgraph UI["🖥️ 1. 메인 대시보드 & 워크플로우 계층 (app.py)"]
         Upload["📂 다중 파일 업로드 & 확장자별 분류<br/>(📊Excel / 📈CSV / 📄Word / 📝TXT + 원클릭 초기화)"]
         NL2SQL["🤖 build_smart_sql()<br/>(전체조회 · 부분키워드 · 미기입 · 정렬 SQL 변환)"]
-        ExtHub["🌟 4️⃣ 심화 확장 센터 (A·B·C 동시 가동)<br/>💬 로컬 채팅방(Chatflow) · 📚 기준서 대조(RAG) · 🔁 3회 편차 검증"]
+        ExtHub["🌟 4️⃣ 대화형 팝업 채팅방(A) & 3회 반복 상세 검증(C)<br/>💬 로컬 보안 채팅 모달 · 🔁 1~3회차 차이점 비교 및 워드(.docx) 추출"]
     end
 
     subgraph ConfigState["⚙️ 2. 설정 & 상태 스키마 계층"]
