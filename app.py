@@ -18,8 +18,10 @@ import plotly.express as px
 from data_agent.config import (
     PRIMARY_COLOR,
     DISTINCT_PALETTE,
+    NOTION_PALETTE,
     DEFAULT_DEFECT_THRESHOLD,
     MODEL_LABELS,
+    get_theme_css,
 )
 from data_agent.graph import build_agent_graph
 from data_agent.excel_exporter import (
@@ -78,64 +80,11 @@ if "chat_popup_minimized" not in st.session_state:
     st.session_state["chat_popup_minimized"] = False
 if "consistency_data" not in st.session_state:
     st.session_state["consistency_data"] = None
-
-popup_width_css = "min(920px, 72vw)" if st.session_state.get("chat_popup_wide") else "min(620px, 48vw)"
-
-st.markdown(
-    f"""
-    <style>
-    :root {{ --primary-color: #059669 !important; }}
-    span[data-baseweb="tag"],
-    div[data-baseweb="select"] span[data-baseweb="tag"],
-    [data-testid="stMultiSelect"] span[data-baseweb="tag"] {{
-        background-color: #059669 !important;
-        color: #ffffff !important;
-        border-radius: 6px !important;
-        font-weight: 600 !important;
-    }}
-    span[data-baseweb="tag"] span {{ color: #ffffff !important; }}
-    div[role="radiogroup"] label > div:first-child {{ border-color: #059669 !important; }}
-    div[role="radiogroup"] label[data-baseweb="radio"] > div:first-child {{
-        background-color: #059669 !important;
-        border-color: #059669 !important;
-    }}
-    button[kind="primary"], [data-testid="stBaseButton-primary"] {{
-        background-color: #059669 !important;
-        border-color: #059669 !important;
-        color: white !important;
-    }}
-    button[kind="primary"]:hover, [data-testid="stBaseButton-primary"]:hover {{
-        background-color: #047857 !important;
-        border-color: #047857 !important;
-    }}
-
-    /* 🗗 배경 스크롤(1·2·3번 확인)을 절대 막지 않는 우측 고정 플로팅 팝업 채팅창 스타일 */
-    div[data-testid="stVerticalBlock"]:has(#floating-chat-marker):not(:has(div[data-testid="stVerticalBlock"] #floating-chat-marker)) {{
-        position: fixed !important;
-        bottom: 22px !important;
-        right: 26px !important;
-        width: {popup_width_css} !important;
-        max-height: 86vh !important;
-        overflow-y: auto !important;
-        overflow-x: hidden !important;
-        background-color: #ffffff !important;
-        border: 2.5px solid #059669 !important;
-        border-radius: 16px !important;
-        box-shadow: 0 20px 50px rgba(0, 0, 0, 0.28) !important;
-        z-index: 999990 !important;
-        padding: 14px 18px 18px 18px !important;
-    }}
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+if "ui_theme_mode" not in st.session_state:
+    st.session_state["ui_theme_mode"] = "emerald"
 
 
 def _build_compact_sample_str(df: pd.DataFrame, max_rows: int = 100) -> str:
-    """
-    데이터 행을 AI에게 전달할 때 TC-001~TC-015에서 잘리지 않도록 충분히(최대 100건 전체) 전달하되,
-    긴 절차서 문장만 한 줄로 요약하여 토큰 초과를 방지합니다.
-    """
     if df is None or len(df) == 0:
         return "데이터 없음"
     sub = df.head(max_rows).copy()
@@ -184,6 +133,7 @@ def build_pipeline_status_html(
     has_analysis = bool(saved_results) and running_stage == 0
     has_verified_report = has_analysis and any(bool(v.get("report")) for v in saved_results.values())
     has_excel_pkg = has_analysis and any(bool(v.get("excel_bytes")) for v in saved_results.values())
+    is_notion = st.session_state.get("ui_theme_mode") == "notion"
 
     steps_cfg = [
         (1, "1. 문서·시트·양식 스캔", "done" if has_file else "wait", "다중 파일·시트 검증 완료" if has_file else "파일 업로드 대기"),
@@ -210,26 +160,39 @@ def build_pipeline_status_html(
 
     cards_html = []
     for num, title, state_code, desc in steps_cfg:
-        if state_code == "done":
-            bg, border, title_col, sub_col, icon = "#ecfdf5", "#10b981", "#065f46", "#047857", "✅"
-        elif state_code == "running":
-            bg, border, title_col, sub_col, icon = "#eff6ff", "#2563eb", "#1e40af", "#1d4ed8", "🔄"
+        if is_notion:
+            # 노션 데이터베이스 상태(Status) 프로퍼티 스타일
+            if state_code == "done":
+                bg, border, title_col, sub_col, icon = "#F1F8F5", "1px solid #C7E2D4", "#1C3829", "#0F7B6C", "✅"
+            elif state_code == "running":
+                bg, border, title_col, sub_col, icon = "#F0F7FF", "1px solid #C2E0FF", "#183347", "#2EAADC", "🔄"
+            else:
+                bg, border, title_col, sub_col, icon = "#F7F6F3", "1px solid #E9E9E7", "#787774", "#9B9A97", "⏳"
+            radius = "6px"
         else:
-            bg, border, title_col, sub_col, icon = "#f8fafc", "#cbd5e1", "#64748b", "#94a3b8", "⏳"
+            # 에메랄드 대시보드 스타일
+            if state_code == "done":
+                bg, border, title_col, sub_col, icon = "#ecfdf5", "2px solid #10b981", "#065f46", "#047857", "✅"
+            elif state_code == "running":
+                bg, border, title_col, sub_col, icon = "#eff6ff", "2px solid #2563eb", "#1e40af", "#1d4ed8", "🔄"
+            else:
+                bg, border, title_col, sub_col, icon = "#f8fafc", "2px solid #cbd5e1", "#64748b", "#94a3b8", "⏳"
+            radius = "10px"
 
         cards_html.append(
-            f'<div style="flex:1; min-width:155px; background:{bg}; border:2px solid {border}; '
-            f'border-radius:10px; padding:10px 12px; text-align:center; box-shadow:0 1px 3px rgba(0,0,0,0.05);">'
-            f'<div style="font-size:0.86rem; font-weight:700; color:{title_col};">{icon} {title}</div>'
+            f'<div style="flex:1; min-width:155px; background:{bg}; border:{border}; '
+            f'border-radius:{radius}; padding:10px 12px; text-align:center; box-shadow:0 1px 2px rgba(0,0,0,0.03);">'
+            f'<div style="font-size:0.85rem; font-weight:700; color:{title_col};">{icon} {title}</div>'
             f'<div style="font-size:0.74rem; color:{sub_col}; margin-top:4px; font-weight:600;">{desc}</div>'
             f'</div>'
         )
 
+    header_col = "#37352F" if is_notion else "#1e293b"
     return (
         '<div style="margin: 4px 0 14px 0;">'
-        '<div style="font-size:0.92rem; font-weight:700; color:#1e293b; margin-bottom:8px;">'
+        f'<div style="font-size:0.9rem; font-weight:700; color:{header_col}; margin-bottom:8px;">'
         '⚡ 실시간 파이프라인 가동현황</div>'
-        f'<div style="display:flex; gap:10px; flex-wrap:wrap;">{"".join(cards_html)}</div>'
+        f'<div style="display:flex; gap:8px; flex-wrap:wrap;">{"".join(cards_html)}</div>'
         '</div>'
     )
 
@@ -253,10 +216,6 @@ def style_dataframe_with_colors(df: pd.DataFrame):
 
 
 def _detect_mentioned_columns(query_str: str, df_columns: list) -> list:
-    """
-    사용자 질문(예: 'Procedure: 미기입 1건', 'Expected Result 미기입 4건', '기대결과 빈칸')에서
-    지목된 특정 컬럼명을 정확히 찾아냅니다.
-    """
     q_low = query_str.lower()
     q_norm = re.sub(r"[\s_\-]+", "", q_low)
 
@@ -578,17 +537,7 @@ def render_related_links_box(target_df: pd.DataFrame):
             )
 
 
-# =====================================================================
-# 💬 [기능 A 핵심 엔진] 컬럼별 미기입·N/A·특정 조건을 정확히 핀셋 추출하는 채팅 엔진
-# =====================================================================
 def _filter_within_target_df(user_q: str, target_df: pd.DataFrame) -> pd.DataFrame:
-    """
-    [핵심 해결]
-    1) 사용자가 'Procedure 미기입 1건', 'Expected Result 미기입 4건'처럼 특정 컬럼명을 언급하면
-       전체 컬럼이 아니라 **해당 컬럼만** 정확히 검사합니다!
-    2) '미기입/미기재/빈칸/공란/누락' 질문 시에는 N/A나 Not Run을 섞지 않고 **진짜 빈칸('-', '')만** 먼저 추출하여
-       정확히 그 1건, 그 4건만 뽑아냅니다!
-    """
     if target_df is None or len(target_df) == 0 or not user_q.strip():
         return pd.DataFrame()
 
@@ -598,7 +547,6 @@ def _filter_within_target_df(user_q: str, target_df: pd.DataFrame) -> pd.DataFra
         c for c in target_df.columns if str(c).lower() not in ("_polarion", "id", "tc id", "번호", "시트명", "파일명")
     ]
 
-    # 1) 미기입 / 빈칸 / N/A / 미실행 / 불합격 질문 처리
     is_empty_q = any(k in q_low for k in ["미기입", "미기재", "빈칸", "공란", "누락", "비어", "없는"])
     is_na_q = "n/a" in q_low
     is_notrun_q = any(k in q_low for k in ["미실행", "not run"])
@@ -609,7 +557,6 @@ def _filter_within_target_df(user_q: str, target_df: pd.DataFrame) -> pd.DataFra
         for col in check_cols:
             s_col = target_df[col].astype(str).str.strip()
             if is_empty_q and not (is_na_q or is_notrun_q):
-                # 순수 미기입(빈칸 '-' 또는 '')만 정확히 매칭! (Description의 N/A가 섞이지 않음)
                 mask |= s_col.isin(["-", "", "(빈칸)"]) | s_col.str.startswith("[빈칸")
             else:
                 if is_empty_q:
@@ -622,7 +569,6 @@ def _filter_within_target_df(user_q: str, target_df: pd.DataFrame) -> pd.DataFra
                     mask |= s_col.str.contains("빨강|주의|fail|불합격", case=False, na=False)
 
         res_sub = target_df[mask]
-        # 만약 순수 빈칸으로 0건이 나왔다면 N/A까지 포함해 재탐색
         if len(res_sub) == 0 and is_empty_q:
             for col in check_cols:
                 s_col = target_df[col].astype(str).str.strip()
@@ -630,7 +576,6 @@ def _filter_within_target_df(user_q: str, target_df: pd.DataFrame) -> pd.DataFra
             res_sub = target_df[mask]
         return res_sub
 
-    # 2) 특정 TC ID(예: TC-015, TC-042)를 직접 물어본 경우
     tc_ids = re.findall(r"(?:TC|RTC)[\-_]?\d+", user_q, flags=re.IGNORECASE)
     if tc_ids:
         row_text = target_df.astype(str).agg(" ".join, axis=1)
@@ -639,7 +584,6 @@ def _filter_within_target_df(user_q: str, target_df: pd.DataFrame) -> pd.DataFra
             mask |= row_text.str.contains(re.escape(tid), case=False, na=False)
         return target_df[mask]
 
-    # 3) 일반 키워드 질문 매칭
     stop_words = {
         "전체", "조회", "해줘", "보여줘", "찾아줘", "검색", "데이터", "항목", "행", "열", "에서", "만",
         "그리고", "또는", "이나", "이랑", "랑", "과", "와", "포함", "있는", "없는", "표로", "목록", "뽑아줘",
@@ -686,7 +630,6 @@ def _execute_chat_turn(
         first_m = next(iter(st.session_state["saved_results"].values()))
         saved_rep_context = f"\n[직전 3번 AI 분석 리포트 요약]\n{first_m.get('report', '')[:1200]}\n"
 
-    # 핵심: 매칭된 행이 있으면 전수 전달하고, 매칭된 행이 없어도 전체 조회 행(최대 100건 전체)을 잘림 없이 전달!
     if len(matched_sub_df) > 0:
         sub_rows_str = (
             f"\n[질문 조건에 정확히 매칭된 행 — 총 {len(matched_sub_df)}건 전수 명단]\n"
@@ -750,12 +693,16 @@ def render_chat_messenger_ui(
     verdict_now = evaluate_threshold_verdict(target_df, threshold=defect_threshold)
     has_prev_rep = bool(st.session_state.get("saved_results"))
     filter_badge = f"검색조건('{active_filter_text}') — 총 {len(target_df):,}건 (원본 {len(raw_df):,}건 중)" if active_filter_text else f"전체 {len(target_df):,}건 전수 연동"
+    is_notion = st.session_state.get("ui_theme_mode") == "notion"
 
     top_c1, top_c2, top_c3 = st.columns([2.0, 1.3, 0.7])
     with top_c1:
         mem_badge = "✅ 3번 리포트 + 미기입 TC ID 전수 명단 연동됨" if has_prev_rep else "📊 전수 데이터·미기입 ID 명단 연동됨"
+        bg_col = "#F7F6F3" if is_notion else "#ecfdf5"
+        bd_col = "#E9E9E7" if is_notion else "#10b981"
+        tx_col = "#37352F" if is_notion else "#065f46"
         st.markdown(
-            f'<div style="background:#ecfdf5; border:1px solid #10b981; border-radius:8px; padding:8px 12px; font-size:0.82rem; color:#065f46; font-weight:600;">'
+            f'<div style="background:{bg_col}; border:1px solid {bd_col}; border-radius:6px; padding:8px 12px; font-size:0.82rem; color:{tx_col}; font-weight:600;">'
             f'🧠 <b>메모리:</b> {filter_badge} (기준 {defect_threshold}%) | {mem_badge}'
             f'</div>',
             unsafe_allow_html=True,
@@ -828,13 +775,16 @@ def render_floating_popup_chat_window(
     aux_sheets: dict[str, pd.DataFrame],
     defect_threshold: float,
 ):
+    is_notion = st.session_state.get("ui_theme_mode") == "notion"
+    header_bg = "#37352F" if is_notion else "#059669"
+
     with st.container():
         st.markdown('<div id="floating-chat-marker"></div>', unsafe_allow_html=True)
 
         h_c1, h_c2, h_c3, h_c4 = st.columns([2.2, 0.75, 0.65, 0.75])
         with h_c1:
             st.markdown(
-                f'<div style="background:#059669; color:white; padding:7px 12px; border-radius:8px; font-weight:700; font-size:0.9rem;">'
+                f'<div style="background:{header_bg}; color:white; padding:7px 12px; border-radius:6px; font-weight:700; font-size:0.9rem;">'
                 f'💬 팝업 채팅창 (전체 {len(target_df):,}건 전수 연동)'
                 f'</div>',
                 unsafe_allow_html=True,
@@ -891,9 +841,6 @@ def render_floating_popup_chat_window(
         )
 
 
-# =====================================================================
-# 📄 [기능 C 전용] 파트회의 공유용 3회 반복 일관성 검증 보고서 Word(.docx) 생성기
-# =====================================================================
 def export_consistency_benchmark_to_docx(
     target_df: pd.DataFrame,
     bench_data: dict,
@@ -1049,6 +996,8 @@ def render_visualization_fragment(
     defect_threshold: float,
 ):
     st.subheader("2️⃣ 조회된 데이터 다차원 시각화 & 한글 기초통계 집계")
+    active_palette = NOTION_PALETTE if st.session_state.get("ui_theme_mode") == "notion" else DISTINCT_PALETTE
+
     v_tab1, v_tab2, v_tab3 = st.tabs([
         "🎯 핵심 다차원 대시보드 (TOP 순위·시나리오 그룹핑·사내 기준선 자동 연동)",
         "🛠️ 자유 조합 커스텀 차트 (모든 엑셀/CSV/문서 범용)",
@@ -1092,7 +1041,7 @@ def render_visualization_fragment(
             custom_df = custom_df.sort_values(by=y_plot, ascending=False).head(30)
             fig_custom = px.bar(
                 custom_df, x=x_col, y=y_plot, color=color_col or x_col, barmode="group",
-                text_auto=True, color_discrete_sequence=DISTINCT_PALETTE,
+                text_auto=True, color_discrete_sequence=active_palette,
                 title=f"[{x_col}]별 {y_plot} 비교 (상위 30개)",
             )
             fig_custom.update_traces(textposition="outside", cliponaxis=False)
@@ -1295,53 +1244,51 @@ def render_agent_analysis_section(
         for idx, m_code in enumerate(display_models):
             res_item = saved[m_code]
             with cols[idx]:
-                if st.button(f"📊 {MODEL_LABELS.get(m_code, m_code)}\n(클릭 시 시각화 팝업 열기 🔍)", key=f"title_btn_{m_code}", use_container_width=True):
-                    show_model_visual_popup(m_code, res_item, popup_df, defect_threshold)
+                with st.container(border=True):
+                    if st.button(f"📊 {MODEL_LABELS.get(m_code, m_code)}\n(클릭 시 시각화 팝업 열기 🔍)", key=f"title_btn_{m_code}", use_container_width=True):
+                        show_model_visual_popup(m_code, res_item, popup_df, defect_threshold)
 
-                st.info(
-                    f"🕒 분석 일시: **{res_item.get('analyzed_at', '-')}** | "
-                    f"⏱️ 소요 시간: **{res_item['elapsed_time']}초**"
-                )
-                updated_report = re.sub(
-                    r"^>\s*\*\*.*?\*\*\n\n",
-                    f"> **{live_verdict}**\n\n",
-                    res_item["report"],
-                    count=1,
-                )
-                st.markdown(updated_report)
+                    st.info(
+                        f"🕒 분석 일시: **{res_item.get('analyzed_at', '-')}** | "
+                        f"⏱️ 소요 시간: **{res_item['elapsed_time']}초**"
+                    )
+                    updated_report = re.sub(
+                        r"^>\s*\*\*.*?\*\*\n\n",
+                        f"> **{live_verdict}**\n\n",
+                        res_item["report"],
+                        count=1,
+                    )
+                    st.markdown(updated_report)
 
-                dl_b1, dl_b2 = st.columns(2)
-                with dl_b1:
-                    live_single_xlsx = export_analysis_to_excel(
-                        popup_df, summary_df, updated_report, res_item["elapsed_time"], m_code,
-                        aux_sheets=saved_aux, threshold=defect_threshold, analyzed_at=res_item.get("analyzed_at"),
-                    )
-                    st.download_button(
-                        label=f"📥 {m_code} 엑셀 (.xlsx)",
-                        data=live_single_xlsx,
-                        file_name=f"report_{m_code}.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        key=f"dl_persist_xlsx_{m_code}_{idx}",
-                        use_container_width=True,
-                    )
-                with dl_b2:
-                    live_single_docx = export_analysis_to_docx(
-                        popup_df, updated_report, res_item["elapsed_time"], MODEL_LABELS.get(m_code, m_code),
-                        threshold=defect_threshold, analyzed_at=res_item.get("analyzed_at"),
-                    )
-                    st.download_button(
-                        label=f"📄 {m_code} 워드 (.docx)",
-                        data=live_single_docx,
-                        file_name=f"report_{m_code}.docx",
-                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                        key=f"dl_persist_docx_{m_code}_{idx}",
-                        use_container_width=True,
-                    )
+                    dl_b1, dl_b2 = st.columns(2)
+                    with dl_b1:
+                        live_single_xlsx = export_analysis_to_excel(
+                            popup_df, summary_df, updated_report, res_item["elapsed_time"], m_code,
+                            aux_sheets=saved_aux, threshold=defect_threshold, analyzed_at=res_item.get("analyzed_at"),
+                        )
+                        st.download_button(
+                            label=f"📥 {m_code} 엑셀 (.xlsx)",
+                            data=live_single_xlsx,
+                            file_name=f"report_{m_code}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            key=f"dl_persist_xlsx_{m_code}_{idx}",
+                            use_container_width=True,
+                        )
+                    with dl_b2:
+                        live_single_docx = export_analysis_to_docx(
+                            popup_df, updated_report, res_item["elapsed_time"], MODEL_LABELS.get(m_code, m_code),
+                            threshold=defect_threshold, analyzed_at=res_item.get("analyzed_at"),
+                        )
+                        st.download_button(
+                            label=f"📄 {m_code} 워드 (.docx)",
+                            data=live_single_docx,
+                            file_name=f"report_{m_code}.docx",
+                            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                            key=f"dl_persist_docx_{m_code}_{idx}",
+                            use_container_width=True,
+                        )
 
 
-# =====================================================================
-# 🌟 4️⃣ 대화형 후속 질문 채팅방(A) & 3회 반복 상세 차이점 검증기(C)
-# =====================================================================
 @st.fragment
 def render_advanced_extensions_hub(
     target_df: pd.DataFrame,
@@ -1579,9 +1526,98 @@ def render_advanced_extensions_hub(
 
 
 # =====================================================================
-# 📂 메인 대시보드 상단 제목 및 파일 업로드
+# ⚙️ 사이드바 설정 (🎨 방안 A: 에메랄드 vs 노션 UI 테마 실시간 스위치 탑재!)
 # =====================================================================
-st.title("📊 자연어 기반 사내 데이터 분석 Agent")
+with st.sidebar:
+    st.header("⚙️ 실행 및 테마 설정")
+
+    # [방안 A] UI 디자인 테마 실시간 스위치
+    theme_choice = st.radio(
+        "🎨 웹 UI 디자인 테마 선택",
+        options=["emerald", "notion"],
+        index=0 if st.session_state.get("ui_theme_mode", "emerald") == "emerald" else 1,
+        format_func=lambda x: "🌿 에메랄드 대시보드 (기본)" if x == "emerald" else "📓 노션(Notion) 워크스페이스",
+        horizontal=True,
+    )
+    if theme_choice != st.session_state.get("ui_theme_mode"):
+        st.session_state["ui_theme_mode"] = theme_choice
+        st.rerun()
+
+    if st.button("🔄 업로드 파일 & 전체 입력 초기화", key="sidebar_reset_all", type="primary", use_container_width=True):
+        reset_all_inputs_and_files()
+        st.rerun()
+
+    if st.session_state["saved_results"]:
+        if st.button("🗑️ AI 분석 결과만 초기화 (파일 유지)", key="sidebar_reset_res", use_container_width=True):
+            st.session_state["saved_results"] = {}
+            st.session_state["pipeline_logs"] = []
+            st.rerun()
+
+    st.divider()
+    run_type = st.radio("실행 방식 선택", options=["다중 모델 동시 비교 (PoC)", "단일 모델 실행"], index=0)
+
+    if run_type == "단일 모델 실행":
+        selected_models = [
+            st.selectbox("사용할 AI 모델", options=list(MODEL_LABELS.keys()), format_func=lambda x: MODEL_LABELS[x])
+        ]
+    else:
+        selected_models = st.multiselect(
+            "비교할 AI 모델들을 선택하세요 (병렬 동시 실행)",
+            options=list(MODEL_LABELS.keys()),
+            default=["cloud_groq", "cloud_gemini", "local_ollama"],
+            format_func=lambda x: MODEL_LABELS[x],
+        )
+
+    st.divider()
+    st.subheader("🎚️ 사내 품질 기준값 설정 (W47)")
+    defect_threshold = st.slider(
+        "사내 관리 기준값 / 임계치 (%)",
+        min_value=0.5,
+        max_value=50.0,
+        value=float(DEFAULT_DEFECT_THRESHOLD),
+        step=0.5,
+        help="제조 데이터는 '허용 불량률(%)', TC/일반 문서는 '컬럼별 허용 미기입률(%) 및 주요 분류 기준 비중(%)'으로 즉시 적용됩니다.",
+    )
+    st.caption(
+        f"현재 기준: **{defect_threshold}%** "
+        f"(바꾸면 상단 판정 배너·통계표·엑셀/워드 `자동 판정 요약`이 즉시 **{defect_threshold}%** 기준으로 변경됩니다)"
+    )
+
+    st.divider()
+    ollama_models = get_installed_ollama_models()
+    with st.expander("🖥️ 로컬 Ollama 상세 설정 & 모델 안내 (클릭)", expanded=False):
+        chosen_ollama = st.selectbox("구동할 로컬 모델 변경", options=ollama_models, index=0)
+        os.environ["LOCAL_MODEL_NAME"] = chosen_ollama
+
+
+# 선택된 테마('emerald' vs 'notion') CSS 동적 주입
+popup_width_css = "min(920px, 72vw)" if st.session_state.get("chat_popup_wide") else "min(620px, 48vw)"
+st.markdown(
+    get_theme_css(st.session_state.get("ui_theme_mode", "emerald"), popup_width_css),
+    unsafe_allow_html=True,
+)
+
+
+# =====================================================================
+# 📂 메인 대시보드 상단 제목 (테마별 맞춤형 헤더) 및 파일 업로드
+# =====================================================================
+if st.session_state.get("ui_theme_mode") == "notion":
+    st.markdown(
+        '<div style="padding: 4px 0 12px 0; border-bottom: 1px solid #E9E9E7; margin-bottom: 14px;">'
+        '<div style="font-size: 0.82rem; color: #787774; margin-bottom: 6px;">'
+        '🗂️ 사내 데이터 분석 Workspace &nbsp;/&nbsp; 📄 자연어 기반 데이터·문서 분석 AI Agent'
+        '</div>'
+        '<div style="font-size: 2.0rem; font-weight: 700; color: #37352F; letter-spacing: -0.03em;">'
+        '📓 자연어 기반 사내 데이터 분석 Agent'
+        '</div>'
+        '<div style="font-size: 0.88rem; color: #787774; margin-top: 4px;">'
+        '사내 엑셀·CSV·워드 문서를 자동 DB화하고 다차원 시각화 및 3대 AI 비교 보고서(.xlsx / .docx)를 생성합니다.'
+        '</div>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+else:
+    st.title("📊 자연어 기반 사내 데이터 분석 Agent")
 
 up_col1, up_col2 = st.columns([4, 1])
 with up_col1:
@@ -1724,58 +1760,6 @@ if uploaded_files:
         st.session_state["chat_history"] = []
         st.session_state["chat_popup_mode"] = False
         st.session_state["consistency_data"] = None
-
-
-# =====================================================================
-# ⚙️ 사이드바 설정
-# =====================================================================
-with st.sidebar:
-    st.header("⚙️ 실행 및 비교 모델 설정")
-    if st.button("🔄 업로드 파일 & 전체 입력 초기화", key="sidebar_reset_all", type="primary", use_container_width=True):
-        reset_all_inputs_and_files()
-        st.rerun()
-
-    if st.session_state["saved_results"]:
-        if st.button("🗑️ AI 분석 결과만 초기화 (파일 유지)", key="sidebar_reset_res", use_container_width=True):
-            st.session_state["saved_results"] = {}
-            st.session_state["pipeline_logs"] = []
-            st.rerun()
-
-    st.divider()
-    run_type = st.radio("실행 방식 선택", options=["다중 모델 동시 비교 (PoC)", "단일 모델 실행"], index=0)
-
-    if run_type == "단일 모델 실행":
-        selected_models = [
-            st.selectbox("사용할 AI 모델", options=list(MODEL_LABELS.keys()), format_func=lambda x: MODEL_LABELS[x])
-        ]
-    else:
-        selected_models = st.multiselect(
-            "비교할 AI 모델들을 선택하세요 (병렬 동시 실행)",
-            options=list(MODEL_LABELS.keys()),
-            default=["cloud_groq", "cloud_gemini", "local_ollama"],
-            format_func=lambda x: MODEL_LABELS[x],
-        )
-
-    st.divider()
-    st.subheader("🎚️ 사내 품질 기준값 설정 (W47)")
-    defect_threshold = st.slider(
-        "사내 관리 기준값 / 임계치 (%)",
-        min_value=0.5,
-        max_value=50.0,
-        value=float(DEFAULT_DEFECT_THRESHOLD),
-        step=0.5,
-        help="제조 데이터는 '허용 불량률(%)', TC/일반 문서는 '컬럼별 허용 미기입률(%) 및 주요 분류 기준 비중(%)'으로 즉시 적용됩니다.",
-    )
-    st.caption(
-        f"현재 기준: **{defect_threshold}%** "
-        f"(바꾸면 상단 판정 배너·통계표·엑셀/워드 `자동 판정 요약`이 즉시 **{defect_threshold}%** 기준으로 변경됩니다)"
-    )
-
-    st.divider()
-    ollama_models = get_installed_ollama_models()
-    with st.expander("🖥️ 로컬 Ollama 상세 설정 & 모델 안내 (클릭)", expanded=False):
-        chosen_ollama = st.selectbox("구동할 로컬 모델 변경", options=ollama_models, index=0)
-        os.environ["LOCAL_MODEL_NAME"] = chosen_ollama
 
 
 # =====================================================================
