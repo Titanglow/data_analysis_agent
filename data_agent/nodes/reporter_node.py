@@ -37,11 +37,40 @@ def _convert_markdown_table_lines(text: str) -> str:
     return "\n".join(out_lines)
 
 
+def _strip_dumped_sample_rows(text: str) -> str:
+    """
+    Groq 등이 4번 섹션 뒤에 '5. 상세 행 샘플 데이터', '6. 상세 행 샘플 데이터 (상위 40건)' 등을 붙이며
+    TC-001, TC-002 원본 행을 줄줄이 복사하다가 끊기는 현상을 원천 제거합니다.
+    """
+    lines = text.splitlines()
+    kept_lines = []
+    in_sec_4 = False
+
+    for line in lines:
+        s = line.strip()
+        if re.match(r"^(?:#+\s*)?4\.\s*", s):
+            in_sec_4 = True
+
+        # 5번 이상 섹션 제목이나 '상세 행 샘플 데이터' 제목이 등장하면 그 즉시 뒤쪽을 모두 잘라냄!
+        if re.match(r"^(?:#+\s*)?[5-9]\.\s*", s) or "상세 행 샘플 데이터" in s or "상세 행 데이터" in s:
+            break
+
+        # 4번 섹션 이후에 '- TC-001' 처럼 개별 원본 행을 덤프하기 시작하면 중단
+        if in_sec_4 and re.match(r"^[-*•]\s*TC-\d{3,}", s):
+            break
+
+        kept_lines.append(line)
+
+    return "\n".join(kept_lines).strip()
+
+
 def _sanitize_report_format(text: str, has_color_cells: bool = False) -> str:
     if not text:
         return ""
 
-    cleaned = _convert_markdown_table_lines(text)
+    # 1. 불필요한 5~6번 샘플 데이터 덤프 구간 먼저 제거
+    cleaned = _strip_dumped_sample_rows(text)
+    cleaned = _convert_markdown_table_lines(cleaned)
     cleaned = re.sub(r"<br\s*/?>\s*-\s*", ", ", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"<br\s*/?>", ", ", cleaned, flags=re.IGNORECASE)
 
@@ -66,7 +95,6 @@ def _sanitize_report_format(text: str, has_color_cells: bool = False) -> str:
             continue
         if s in ["- 수동 테스트는 없습니다.", "수동 테스트는 없습니다."]:
             continue
-        # 원본 파일에 배경색이 없을 때(has_color_cells=False) LLM이 습관적으로 적은 빨강/노랑 배경 문구 제거
         if not has_color_cells:
             line = re.sub(r"\(?🔴\s*빨강(?:/🟡\s*노랑)?\s*배경(?:셀)?\)?", "", line)
             line = re.sub(r"주의\s*표시\(🔴빨강\)로\s*분류된\s*항목이\s*있으므로,?\s*", "", line)
@@ -87,9 +115,10 @@ def _ensure_complete_report(
     if not cleaned:
         cleaned = "⚠️ 리포트 생성 결과가 비어 있습니다."
 
-    if not cleaned.endswith((".", "다", "요", "함", "음", ")", "]", "%")):
+    # 마지막 줄이 문장 중간에 끊겼으면 깔끔하게 마침표 줄까지만 유지
+    if not cleaned.endswith((".", "다", "요", "함", "음", ")", "]", "%", "*")):
         last_newline = cleaned.rfind("\n")
-        if last_newline > 0 and len(cleaned) - last_newline < 45:
+        if last_newline > 0 and len(cleaned) - last_newline < 65:
             cleaned = cleaned[:last_newline].strip()
 
     if "4." not in cleaned and "조치 제안" not in cleaned:
@@ -107,7 +136,6 @@ def _ensure_complete_report(
                 "- **근본 대책 (1개월 내 / 품질·기술팀)**: 반복 발생 유형에 대한 표준 작업서(SOP) 개정 및 예방 점검 주기를 단축하십시오."
             )
 
-    # 리포트 최상단에 파이썬이 계산한 정확한 사내 기준(threshold%) 판정 배너 고정 부착
     if verdict_banner:
         cleaned = f"> **{verdict_banner}**\n\n{cleaned}"
     return cleaned
@@ -121,7 +149,6 @@ def reporter_node(state: dict[str, Any]) -> dict[str, Any]:
     defect_threshold = float(state.get("defect_threshold", 1.5) or 1.5)
     prev_elapsed = float(state.get("elapsed_time", 0.0) or 0.0)
 
-    # data_summary 안에 포함된 파이썬 자동 판정 요약 추출
     verdict_banner = ""
     for line in data_summary.splitlines():
         if line.startswith("[사내 기준 자동 판정]:"):
@@ -139,14 +166,15 @@ def reporter_node(state: dict[str, Any]) -> dict[str, Any]:
         )
 
         prompt = f"""당신은 수석 QA 및 검증 데이터 분석 전문가입니다.
-반드시 아래 [파이썬 정밀 집계 및 데이터 요약]에 적힌 **실제 컬럼명과 실제 계산된 건수·비중(%)**만 그대로 사용하여 분석 리포트를 작성하십시오.
+반드시 아래 [파이썬 정밀 집계 및 데이터 요약]에 적힌 **실제 컬럼명과 실제 계산된 건수·비중(%)**만 그대로 사용하여 고품질 분석 리포트를 작성하십시오.
 
 [절대 준수 규칙 — 위반 시 심각한 오류]
-1. **[환각 절대 금지]** [파이썬 정밀 집계 및 데이터 요약]에 없는 분류 이름(예: 표에 없는 '주문 시스템 30건', '결제 시스템 15건' 등)이나 없는 숫자를 절대 스스로 지어내지 마십시오. 오직 파이썬 집계표에 실제로 찍혀 있는 항목명과 숫자만 인용하십시오.
-2. 마크다운 표(|)나 HTML 줄바꿈 태그(<br>)를 절대 사용하지 말고, 오직 불릿 리스트(- )로만 깔끔하게 작성하십시오.
-3. 건수와 비중(%)을 표기할 때는 반드시 '48건 (76.2%)'처럼 단위와 공백을 띄어 쓰고, 절대 '4876.2%'처럼 숫자를 붙여 쓰지 마십시오.
-4. {color_instruction}
-5. 현재 사용자가 설정한 사내 관리 기준값은 **{defect_threshold}%**입니다. 파이썬 집계표에서 `사내 기준({defect_threshold}%) 판정`이 초과(🚨)이거나 기준 이상(🎯)으로 표시된 항목을 중심으로 설명하십시오.
+1. **[환각 절대 금지]** [파이썬 정밀 집계 및 데이터 요약]에 없는 분류 이름이나 없는 숫자를 절대 스스로 지어내지 마십시오.
+2. **[원본 샘플 행 나열 절대 금지]** 절대 `5.`, `6.` 같은 추가 목차를 만들거나 `[대표 행 참고 샘플]`의 개별 TC 행(TC-001, TC-002 등)을 줄줄이 복사·나열하지 마십시오. 오직 아래 **1번~4번 필수 목차까지만 작성하고 즉시 종료**하십시오.
+3. 마크다운 표(|)나 HTML 줄바꿈 태그(<br>)를 절대 사용하지 말고, 불릿 리스트(- )로만 깔끔하게 작성하십시오.
+4. 건수와 비중(%)을 표기할 때는 반드시 '48건 (76.2%)'처럼 단위와 공백을 띄어 쓰십시오.
+5. {color_instruction}
+6. 현재 사용자가 설정한 사내 관리 기준값은 **{defect_threshold}%**입니다. 파이썬 집계표에서 `사내 기준({defect_threshold}%) 판정`이 초과(🚨)이거나 기준 이상(🎯)으로 표시된 항목을 중심으로 깊이 있게 설명하십시오.
 
 [파이썬 정밀 집계 및 데이터 요약]
 {data_summary}
@@ -157,13 +185,13 @@ def reporter_node(state: dict[str, Any]) -> dict[str, Any]:
 [사용자 질문]
 {question}
 
-[필수 출력 목차 (아래 4개 번호와 제목을 정확히 유지)]
+[필수 출력 목차 (반드시 아래 1~4번만 작성하고 5번 이후는 절대 만들지 마십시오)]
 ### 1. 전체 검증 데이터 요약 및 사내 기준({defect_threshold}%) 판정 현황
 - 전체 조회 건수, 실제 존재하는 주요 컬럼 구성, 사내 기준({defect_threshold}%) 대비 미기입(공란/N/A) 또는 판정 상태 핵심 요약
 
 ### 2. 실제 분류 컬럼별 분포 & 주요 시나리오 그룹핑 심층 분석
-- **실제 분류 컬럼별 분포**: 파이썬 집계표에 나온 실제 분류 열(예: Category, Priority, Test Technique, Domain, Sub System 등 파일에 실제 존재하는 열)의 항목별 건수 (비중%) 및 사내 기준({defect_threshold}%) 이상 집중 항목 정리
-- **시나리오 키워드 그룹핑 분포**: [유사 시나리오·키워드 그룹핑 집계] 표에 나온 상위 시나리오 묶음별 건수 (비중%)와 대표 항목 인용
+- **실제 분류 컬럼별 분포**: 파이썬 집계표에 나온 실제 분류 열(예: Category, Priority, Test Technique, Domain, Sub System 등)의 항목별 건수 (비중%) 및 사내 기준({defect_threshold}%) 이상 집중 항목 정리
+- **시나리오 키워드 그룹핑 분포**: [유사 시나리오·키워드 그룹핑 집계] 표에 나온 상위 시나리오 묶음별 건수 (비중%)와 대표 사례 1~2건만 짧게 인용
 
 ### 3. 데이터 품질 리스크 및 취약 구간 진단 (사내 기준 {defect_threshold}% 관점)
 - **미기입(공란) 및 미실행(Not Run / N/A) 점검**: [전체 컬럼별 데이터 작성 현황] 표에서 미기입률이 사내 기준({defect_threshold}%)을 초과한 컬럼의 구체적 건수·비중 지적
@@ -176,7 +204,7 @@ def reporter_node(state: dict[str, Any]) -> dict[str, Any]:
     else:
         prompt = f"""당신은 사내 데이터 분석 전문 AI 에이전트입니다.
 아래 [파이썬 정밀 집계 및 데이터 요약](적용된 사내 품질 기준값: {defect_threshold}%)의 실제 수치만 사용하여 상세 분석 리포트를 작성하십시오.
-집계표에 없는 숫자를 절대 지어내지 마시고, 마크다운 표(|)나 <br> 태그 없이 불릿(-) 리스트로만 작성하십시오.
+집계표에 없는 숫자를 절대 지어내지 마시고, 원본 샘플 행을 나열하지 마십시오. 반드시 아래 1~4번 목차만 불릿(-) 리스트로 작성하고 종료하십시오.
 
 [파이썬 정밀 집계 및 데이터 요약]
 {data_summary}
