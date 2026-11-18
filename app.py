@@ -31,6 +31,7 @@ from data_agent.excel_exporter import (
     analyze_color_cell_contexts,
     evaluate_threshold_verdict,
     parse_report_into_sections,
+    shorten_long_label,
 )
 from data_agent.llm import get_installed_ollama_models, call_llm
 from data_agent.tools.data_loader import (
@@ -101,10 +102,21 @@ if "uploader_key" not in st.session_state:
     st.session_state["uploader_key"] = 0
 if "chat_history" not in st.session_state:
     st.session_state["chat_history"] = []
-if "chat_popup_mode" not in st.session_state:
-    st.session_state["chat_popup_mode"] = False
 if "consistency_data" not in st.session_state:
     st.session_state["consistency_data"] = None
+
+
+def _build_compact_sample_str(df: pd.DataFrame, max_rows: int = 10) -> str:
+    """
+    AI에게 넘길 때 긴 절차서(Procedure 등) 원문 때문에 모델이 샘플 행을 그대로 복사하다가
+    토큰 제한으로 끊기는 현상을 막기 위해, 각 셀을 42자 이내로 요약한 대표 10건만 전달합니다.
+    """
+    if df is None or len(df) == 0:
+        return "샘플 없음"
+    sub = df.head(max_rows).copy()
+    for c in sub.columns:
+        sub[c] = sub[c].apply(lambda x: shorten_long_label(str(x).replace("\n", " "), 42))
+    return sub.to_string(index=False)
 
 
 def reset_all_inputs_and_files():
@@ -115,7 +127,6 @@ def reset_all_inputs_and_files():
     st.session_state["pipeline_logs"] = []
     st.session_state["current_file_sig"] = ""
     st.session_state["chat_history"] = []
-    st.session_state["chat_popup_mode"] = False
     st.session_state["consistency_data"] = None
     for k in ["nl_q_input", "kw_q_input"]:
         if k in st.session_state:
@@ -427,7 +438,7 @@ def generate_smart_assistant_question(
             f"① 실제 존재하는 분류 열({col_list_str})별 건수·비중(%) 및 사내 기준({threshold}%) 이상 항목, "
             f"② 유사 시나리오 키워드 묶음 분포, "
             f"③ 미기입률 사내 기준({threshold}%) 초과 컬럼 및 실행 상태 점검, "
-            f"④ QA·개발팀의 즉시 조치(24h) 및 검증 표준화 대책(1개월)을 없는 숫자 지어내지 말고 깔끔한 불릿으로 분석해 줘."
+            f"④ QA·개발팀의 즉시 조치(24h) 및 검증 표준화 대책(1개월)을 원본 샘플 나열 없이 1~4번 목차로만 깔끔하게 분석해 줘."
         )
 
     stat_str = ", ".join(stat_snippets)
@@ -504,17 +515,12 @@ def render_related_links_box(target_df: pd.DataFrame):
 # 💬 [기능 A 핵심 엔진] 1번 조회 데이터(예: 배달 14건)와 100% 동기화되는 채팅 엔진
 # =====================================================================
 def _filter_within_target_df(user_q: str, target_df: pd.DataFrame) -> pd.DataFrame:
-    """
-    전체 원본 DB(63건)가 아니라 현재 1번에서 필터링된 target_df(예: '배달' 14건) 안에서만
-    질문과 매칭되는 행을 정확히 추출합니다.
-    """
     if target_df is None or len(target_df) == 0 or not user_q.strip():
         return pd.DataFrame()
 
     q_low = user_q.lower()
     row_text = target_df.astype(str).agg(" ".join, axis=1)
 
-    # 1) 미기입 / 빈칸 / N/A / 주의 항목 요청 시 target_df 안에서만 필터링
     if any(k in q_low for k in ["미기입", "빈칸", "공란", "n/a", "not run", "미실행", "주의", "불합격", "fail"]):
         mask = pd.Series(False, index=target_df.index)
         for col in target_df.columns:
@@ -525,7 +531,6 @@ def _filter_within_target_df(user_q: str, target_df: pd.DataFrame) -> pd.DataFra
             mask |= s_col.str.contains("빈칸|빨강|주의|FAIL", case=False, na=False)
         return target_df[mask].head(20)
 
-    # 2) 일반 키워드 질문 시 target_df 안에서 매칭
     stop_words = {
         "전체", "조회", "해줘", "보여줘", "찾아줘", "검색", "데이터", "항목", "행", "열", "에서", "만",
         "그리고", "또는", "이나", "이랑", "랑", "과", "와", "포함", "있는", "없는", "표로", "목록", "뽑아줘",
@@ -562,7 +567,6 @@ def _execute_chat_turn(
 ):
     st.session_state["chat_history"].append({"role": "user", "content": user_q})
 
-    # 무조건 현재 필터링된 target_df(예: 14건) 내부에서만 검색!
     matched_sub_df = _filter_within_target_df(user_q, target_df)
 
     saved_rep_context = ""
@@ -571,9 +575,9 @@ def _execute_chat_turn(
         saved_rep_context = f"\n[직전 3번 AI 분석 리포트 요약]\n{first_m.get('report', '')[:1400]}\n"
 
     sub_rows_str = (
-        f"\n[현재 조회 데이터({len(target_df)}건) 내 질문 매칭 행 ({len(matched_sub_df)}건)]\n{matched_sub_df.to_string(index=False)}\n"
+        f"\n[현재 조회 데이터({len(target_df)}건) 내 질문 매칭 행 ({len(matched_sub_df)}건)]\n{_build_compact_sample_str(matched_sub_df, 15)}\n"
         if len(matched_sub_df) > 0
-        else f"\n[현재 조회 데이터({len(target_df)}건) 상세 행]\n{target_df.head(25).to_string(index=False)}\n"
+        else f"\n[현재 조회 데이터({len(target_df)}건) 대표 샘플]\n{_build_compact_sample_str(target_df, 12)}\n"
     )
     recent_turns = "\n".join(
         f"{'사용자' if m['role']=='user' else 'AI비서'}: {m['content'][:250]}"
@@ -583,7 +587,7 @@ def _execute_chat_turn(
 
     chat_prompt = f"""당신은 사용자와 실시간으로 대화하는 친절하고 명쾌한 '사내 데이터 AI 비서'입니다.
 장황한 보고서 형식이 아니라, 채팅방에서 대화하듯 **핵심 결론부터 3~6줄 이내의 간결한 불릿(- )으로 즉답**하십시오.
-반드시 아래 [현재 조회 범위({scope_desc})의 파이썬 집계표]와 [상세 행]에 있는 진짜 숫자와 항목명만 말하고, 없는 숫자는 절대 지어내지 마십시오.
+반드시 아래 [현재 조회 범위({scope_desc})의 파이썬 집계표]와 [샘플 행]에 있는 진짜 숫자와 항목명만 말하고, 없는 숫자는 절대 지어내지 마십시오.
 
 [현재 데이터 메모리 범위]: {scope_desc}
 [사내 기준({defect_threshold}%) 판정]: {verdict_now}
@@ -617,10 +621,6 @@ def render_chat_messenger_ui(
     key_suffix: str = "inline",
     chat_height: int = 390,
 ):
-    """
-    인라인 모드와 팝업창 모드 양쪽에서 100% 동일한 target_df(예: 14건)와 chat_history를 공유하는 메신저 UI.
-    입력 처리를 메시지 렌더링보다 먼저 수행하여 팝업창 안에서 질문해도 팝업이 닫히지 않고 즉시 대화가 이어집니다.
-    """
     stat_summary_str = "\n\n".join(
         f"■ {k}\n{v.to_string(index=False)}"
         for k, v in build_korean_stat_tables(target_df, aux_sheets=aux_sheets, threshold=defect_threshold).items()
@@ -687,7 +687,7 @@ def render_chat_messenger_ui(
         if not st.session_state["chat_history"]:
             with st.chat_message("assistant"):
                 st.markdown(
-                    f"안녕하세요! 현재 1번에서 조회된 **{filter_badge}** 데이터와 **3번 리포트·기초통계표**를 정확히 연동하고 있습니다.\n"
+                    f"안녕하세요! 현재 1번에서 조회된 **{filter_badge}** 데이터와 **2번 차트·3번 리포트**를 정확히 연동하고 있습니다.\n"
                     f"위 **빠른 질문 칩 버튼**을 누르시거나, 아래 입력창에 궁금한 점을 물어보세요! *(기본: 사내 보안 로컬 Ollama 구동)*"
                 )
         for msg in st.session_state["chat_history"]:
@@ -698,7 +698,7 @@ def render_chat_messenger_ui(
                     st.dataframe(style_dataframe_with_colors(msg["matched_df"]), use_container_width=True, hide_index=True)
 
 
-@st.dialog("💬 대화형 후속 질문 채팅방 (팝업 모드 — 1·2·3번 메모리 100% 연동)", width="large")
+@st.dialog("💬 대화형 후속 질문 채팅방 (팝업 모드 — 2번 그래프 차트 & 1·3번 메모리 내장)", width="large")
 def show_chat_assistant_popup(
     target_df: pd.DataFrame,
     raw_df: pd.DataFrame,
@@ -708,24 +708,20 @@ def show_chat_assistant_popup(
 ):
     """
     팝업창 모드:
-    - 이 팝업창이 켜져 있는 동안 웹 하단의 4번 인라인 채팅방은 자동으로 '일시 중지(기능 중지)'되어 중복 실행을 막습니다.
-    - 팝업창 안에서도 1번(조회된 14건 표), 2번(기초통계), 3번(AI 리포트)을 바로 펼쳐볼 수 있습니다.
+    - 우측 상단 X 버튼으로 그냥 닫아도 하단 4번 채팅방이 절대 일시중지 상태로 잠기지 않습니다!
+    - 팝업창 안에서도 [📈 2번 다차원 시각화 그래프 차트]를 바로 펼쳐볼 수 있습니다.
     """
-    top_p1, top_p2 = st.columns([2.8, 1.2])
-    with top_p1:
-        st.caption("💡 **팝업 모드가 켜져 있는 동안 웹 하단 4번 채팅방은 자동 일시중지됩니다.** 아래 메뉴를 누르면 팝업을 닫지 않고도 1·2·3번 결과를 바로 볼 수 있습니다.")
-    with top_p2:
-        if st.button("🔽 팝업 종료 (하단 4번 채팅방 복귀)", key="close_popup_return_btn", use_container_width=True):
-            st.session_state["chat_popup_mode"] = False
-            st.rerun()
+    st.caption("💡 **팝업 안에서 바로 `2번 그래프 차트`와 `1·3번 결과`를 함께 펼쳐보며 대화할 수 있습니다. (우측 상단 `X`를 눌러 닫으면 하단 4번 채팅방에 대화 내역이 그대로 이어집니다.)**")
 
-    # 팝업이 떠 있을 때 뒤쪽 1·2·3번이 가려져도 팝업 안에서 바로 펼쳐볼 수 있는 미니 참조 탭
-    with st.expander(f"📊 팝업 안에서 1번(조회 데이터 {len(target_df)}건) · 2번(기초통계) · 3번(AI 리포트) 바로 확인하기 (클릭)", expanded=False):
-        ref_t1, ref_t2, ref_t3 = st.tabs([
-            f"1️⃣ 현재 조회된 표 ({len(target_df)}건)",
-            "2️⃣ 한글 기초통계 집계표",
-            "3️⃣ 직전 AI 분석 리포트",
+    with st.expander(f"📈 팝업 안에서 [2번 다차원 그래프 차트] · [1번 데이터 표({len(target_df)}건)] · [3번 AI 리포트] 바로 보기 (클릭)", expanded=False):
+        ref_t_chart, ref_t1, ref_t2, ref_t3 = st.tabs([
+            "📈 2️⃣ 다차원 그래프 차트",
+            f"📋 1️⃣ 조회된 데이터 표 ({len(target_df)}건)",
+            "📊 2️⃣ 한글 기초통계 집계표",
+            "📝 3️⃣ 직전 AI 분석 리포트",
         ])
+        with ref_t_chart:
+            render_smart_charts(target_df, key_prefix="popup_chat_chart", defect_threshold=defect_threshold)
         with ref_t1:
             st.dataframe(style_dataframe_with_colors(target_df), use_container_width=True, hide_index=True, height=220)
         with ref_t2:
@@ -749,7 +745,7 @@ def show_chat_assistant_popup(
         aux_sheets=aux_sheets,
         defect_threshold=defect_threshold,
         key_suffix="popup_modal",
-        chat_height=410,
+        chat_height=400,
     )
 
 
@@ -1031,7 +1027,8 @@ def render_agent_analysis_section(
                 f"■ {k}\n{v.to_string(index=False)}"
                 for k, v in build_korean_stat_tables(target_df, aux_sheets=aux_sheets, threshold=defect_threshold).items()
             )
-            sample_rows_df = target_df.head(40)
+            # 중요: 40건 전체 원문 대신 10건 요약 샘플만 전달하여 Groq 등이 샘플을 그대로 복사하다가 끊기는 현상 방지!
+            compact_sample_str = _build_compact_sample_str(target_df, max_rows=10)
 
             data_info = (
                 f"[분석 일시]: {analyzed_at_now}\n"
@@ -1041,7 +1038,7 @@ def render_agent_analysis_section(
                 f"[사내 기준 자동 판정]: {verdict_now}\n"
                 f"[실제 존재하는 컬럼 목록]: {list(target_df.columns)}\n\n"
                 f"[파이썬 정밀 집계표]\n{stat_summary_str}\n\n"
-                f"[상세 행 샘플 데이터 (상위 40건)]\n{sample_rows_df.to_string(index=False)}"
+                f"[대표 항목 참고용 요약 샘플 (인용 참고용이며 리포트에 절대 나열하지 말 것)]\n{compact_sample_str}"
             )
 
             new_results = {}
@@ -1094,7 +1091,7 @@ def render_agent_analysis_section(
                         unsafe_allow_html=True,
                     )
 
-            logs.append(f"**[4단계 완료]** 사내 기준(`{defect_threshold}%`) 자동 판정 배너 적용 및 환각 방지 정제 완료")
+            logs.append(f"**[4단계 완료]** 사내 기준(`{defect_threshold}%`) 자동 판정 배너 적용 및 샘플 나열 방지 정제 완료")
             logs.append("**[5단계 완료]** 통합 엑셀(`.xlsx`) 및 페이지 분리형 워드(`.docx`) 보고서 패키징 완료")
             status_box.update(label="🎉 1~5단계 전 파이프라인 가동 및 정밀 분석 완료!", state="complete", expanded=False)
 
@@ -1203,6 +1200,7 @@ def render_agent_analysis_section(
 
 # =====================================================================
 # 🌟 4️⃣ 대화형 후속 질문 채팅방(A) & 3회 반복 상세 차이점 검증기(C)
+# (일시중지 잠김 버그 완전 제거 + 좌우 분할 나란히 보기 + 팝업 내 2번 그래프 차트 포함!)
 # =====================================================================
 @st.fragment
 def render_advanced_extensions_hub(
@@ -1215,40 +1213,65 @@ def render_advanced_extensions_hub(
     st.subheader("4️⃣ 대화형 후속 질문 채팅방 (Chatflow) & 3회 반복 일관성 상세 검증기")
 
     tab_a, tab_c = st.tabs([
-        "💬 [기능 A] 대화형 후속 질문 채팅방 (팝업창 모드 & 1·2·3번 메모리 100% 연동)",
+        "💬 [기능 A] 대화형 후속 질문 채팅방 (기본 모드 · 좌우 분할 차트 동시보기 · 팝업창 지원)",
         "🔁 [기능 C] 3회 반복 실행 '일관성 vs 차이점' 상세 비교 (파트회의 공유용 워드 .docx 추출)",
     ])
 
     # -----------------------------------------------------------------
-    # 💬 [기능 A] 대화형 후속 질문 채팅방 (팝업창 켜면 하단 4번은 자동 기능 중지!)
+    # 💬 [기능 A] 잠김 버그 없이 2번 그래프 차트와 함께 보는 대화형 채팅방
     # -----------------------------------------------------------------
     with tab_a:
-        if st.session_state.get("chat_popup_mode", False):
-            # 팝업 모드가 켜져 있을 때는 웹 하단 4번 채팅방을 일시 중지(기능 중지)하여 중복 실행 원천 차단!
-            st.warning(
-                "⏸️ **현재 [팝업 채팅창 모드]가 실행 중이어서 하단 4번 채팅방 기능은 일시 중지되었습니다.**\n\n"
-                "- 팝업창과 하단 채팅창이 중복 실행되지 않도록 보호 중이며, **현재 조회된 데이터 메모리(예: 필터링된 건수 및 3번 리포트)**는 팝업창에 100% 연동되어 있습니다."
+        ctrl_c1, ctrl_c2 = st.columns([2.7, 1.3])
+        with ctrl_c1:
+            layout_mode = st.radio(
+                "🖥️ 채팅방 화면 배치 방식 선택:",
+                options=[
+                    "💬 기본 채팅창 모드",
+                    "🖥️ 좌우 분할 모드 (왼쪽: 2번 그래프 차트·3번 리포트 / 오른쪽: 실시간 채팅방 나란히 보기)",
+                ],
+                index=0,
+                horizontal=True,
+                key="chat_layout_mode_radio",
             )
-            p_btn1, p_btn2 = st.columns(2)
-            with p_btn1:
-                if st.button("💬 팝업 채팅창 다시 띄우기", key="reopen_popup_chat_btn", type="primary", use_container_width=True):
-                    show_chat_assistant_popup(target_df, raw_df, active_filter_text, aux_sheets, defect_threshold)
-            with p_btn2:
-                if st.button("🔽 팝업 모드 끄고 하단 4번 채팅방 다시 켜기", key="disable_popup_mode_btn", use_container_width=True):
-                    st.session_state["chat_popup_mode"] = False
-                    st.rerun()
-        else:
-            pop_c1, pop_c2 = st.columns([2.6, 1.4])
-            with pop_c1:
-                st.caption(
-                    f"💡 **1번에서 조회된 데이터({len(target_df):,}건) 및 3번 리포트와 100% 연동된 대화방입니다.** "
-                    "우측 버튼을 누르면 **팝업창 모드**로 전환되며 하단 4번 채팅창은 자동으로 일시 중지됩니다."
-                )
-            with pop_c2:
-                if st.button("🗗 팝업 채팅창 모드로 열기 (하단 4번 일시중지)", key="activate_popup_chat_btn", type="primary", use_container_width=True):
-                    st.session_state["chat_popup_mode"] = True
-                    show_chat_assistant_popup(target_df, raw_df, active_filter_text, aux_sheets, defect_threshold)
+        with ctrl_c2:
+            st.markdown("<div style='margin-top:8px;'></div>", unsafe_allow_html=True)
+            if st.button("🗗 큰 팝업창으로 채팅방 열기 (차트 내장)", key="open_popup_chat_clean_btn", type="primary", use_container_width=True):
+                show_chat_assistant_popup(target_df, raw_df, active_filter_text, aux_sheets, defect_threshold)
 
+        if layout_mode.startswith("🖥️"):
+            # 좌우 분할 모드: 화면을 가리지 않고 왼쪽에는 2번 그래프 차트/표/3번 리포트, 오른쪽에는 채팅방을 나란히 표시!
+            split_left, split_right = st.columns([1.15, 1.0])
+            with split_left:
+                st.markdown("##### 📊 왼쪽 화면: 2번 그래프 차트 · 1번 표 · 3번 리포트 동시 확인")
+                s_tab1, s_tab2, s_tab3 = st.tabs([
+                    "📈 2️⃣ 다차원 그래프 차트",
+                    f"📋 1️⃣ 조회된 표 ({len(target_df)}건)",
+                    "📝 3️⃣ AI 분석 리포트",
+                ])
+                with s_tab1:
+                    render_smart_charts(target_df, key_prefix="split_left_chart", defect_threshold=defect_threshold)
+                with s_tab2:
+                    st.dataframe(style_dataframe_with_colors(target_df), use_container_width=True, hide_index=True, height=420)
+                with s_tab3:
+                    saved_res = st.session_state.get("saved_results", {})
+                    if saved_res:
+                        for m_k, r_v in saved_res.items():
+                            st.markdown(f"**■ {MODEL_LABELS.get(m_k, m_k)}**")
+                            st.markdown(r_v.get("report", ""))
+                    else:
+                        st.info("아직 3번 에이전트 정밀 분석을 실행하지 않았습니다.")
+            with split_right:
+                st.markdown("##### 💬 오른쪽 화면: 실시간 후속 질문 채팅방")
+                render_chat_messenger_ui(
+                    target_df=target_df,
+                    raw_df=raw_df,
+                    active_filter_text=active_filter_text,
+                    aux_sheets=aux_sheets,
+                    defect_threshold=defect_threshold,
+                    key_suffix="split_inline",
+                    chat_height=430,
+                )
+        else:
             render_chat_messenger_ui(
                 target_df=target_df,
                 raw_df=raw_df,
@@ -1289,13 +1312,15 @@ def render_advanced_extensions_hub(
         if st.button("▶️ 3회 연속 실행 및 '일관성 vs 차이점' 상세 비교 시작", type="primary", key="run_3x_bench_btn"):
             agent_app = build_agent_graph()
             q_bench = generate_smart_assistant_question(target_df, raw_df, active_filter_text, threshold=defect_threshold)
+            compact_sample_str = _build_compact_sample_str(target_df, max_rows=10)
             data_info_bench = (
                 f"[조회 조건]: {active_filter_text or '전체 데이터'}\n"
                 f"[조회 데이터 건수]: {len(target_df)}건\n"
                 f"[적용된 사내 관리 기준값]: {defect_threshold}%\n"
                 f"[사내 기준 자동 판정]: {verdict_now}\n"
                 f"[실제 존재하는 컬럼 목록]: {list(target_df.columns)}\n\n"
-                f"[파이썬 정밀 집계표]\n{stat_summary_str}"
+                f"[파이썬 정밀 집계표]\n{stat_summary_str}\n\n"
+                f"[대표 항목 참고용 요약 샘플]\n{compact_sample_str}"
             )
 
             bench_rows = []
@@ -1583,7 +1608,6 @@ if uploaded_files:
         st.session_state["saved_results"] = {}
         st.session_state["pipeline_logs"] = []
         st.session_state["chat_history"] = []
-        st.session_state["chat_popup_mode"] = False
         st.session_state["consistency_data"] = None
 
 
