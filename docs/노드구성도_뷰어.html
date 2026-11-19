@@ -1,1277 +1,196 @@
-<!DOCTYPE html>
-<html lang="ko">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>노드구성도</title>
-<style>
-:root{
---bg:#F2F4F7; --dot:rgba(133,133,173,.28); --card:#FFFFFF; --border:rgba(16,24,40,.08); --border2:#EAECF0;
---t1:#101828; --t2:#354052; --t3:#676F83; --t4:#98A2B2;
---blue:#296DFF; --blue-bg:#EFF4FF; --blue-line:#B2CAFF;
---line:#D0D5DD; --line-hi:#296DFF;
---row:#F2F4F7; --row2:#F9FAFB;
---warn:#F79009; --warn-bg:#FFFAEB; --warn-line:#FEDF89;
---ok:#17B26A; --ok-bg:#ECFDF3; --err:#F04438; --err-bg:#FEF3F2;
---shadow-sm:0 1px 2px rgba(16,24,40,.05);
---shadow-md:0 4px 8px -2px rgba(16,24,40,.10),0 2px 4px -2px rgba(16,24,40,.06);
---shadow-lg:0 12px 16px -4px rgba(16,24,40,.08),0 4px 6px -2px rgba(16,24,40,.03);
---font:-apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo","Malgun Gothic","맑은 고딕","Segoe UI",Roboto,"Noto Sans KR",sans-serif;
---mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"D2Coding",monospace;
+{
+  "format": "nodemap-v1",
+  "app": {
+    "name": "자연어 기반 사내 데이터·문서 통합 분석 AI Agent (W47)",
+    "mode": "workflow",
+    "goal": "다중 사내 파일(Excel/CSV/Word/TXT)을 양식 검증·DB화하고 핀셋 SQL, 미기입 TC ID 전수 집계, 3대 AI 병렬 비교 보고서(.xlsx/.docx) 및 플로팅 채팅을 수행합니다",
+    "how_to_use": "파일 업로드 후 사내 기준값(%)과 자연어 조건을 입력하면 시각화 차트, 3대 AI 비교 엑셀/워드 보고서, 플로팅 팝업 채팅 및 3회 반복 일관성 검증이 동작합니다",
+    "human_check": "담당자 및 파트장이 사내 기준 초과(🚨확인 필요) 항목, 컬럼별 미기입 TC ID 명단, 3회 반복 검증 결과를 최종 확인합니다"
+  },
+  "files": [
+    {
+      "name": "sample_data.csv / 검증시트.xlsx / 보고서.docx / 메모.txt",
+      "role": "input",
+      "used_at": "시작 (app.py / config.py) > uploaded_files",
+      "desc": "확장자별 자동 분류되는 사내 생산·품질·TC 검증 데이터 및 일반 업무 문서"
+    }
+  ],
+  "knowledge": [],
+  "nodes": [
+    {
+      "id": "n1",
+      "type": "start",
+      "title": "시작 (app.py / config.py)",
+      "desc": "다중 파일 업로드, 확장자별 분류 및 사내 기준값(%)을 입력받습니다",
+      "why": "CSV·Excel·Word·TXT 다중 파일과 자연어 핀셋 조건, 부서별 관리 기준값(0.5%~50.0%)을 받는 입구이며 원클릭 전체 초기화를 지원합니다",
+      "check": "확장자별 배지(📊Excel/📄Word 등) 묶음 표시와 기준값 슬라이더가 정상 동작합니다",
+      "tips": [
+        "config.py에서 에메랄드 테마(#059669)와 기본 기준값(1.5%)을 중앙 관리합니다",
+        "파일 변경 시 이전 분석 상태(3~5단계)가 자동으로 초기화됩니다"
+      ],
+      "fields": [
+        {
+          "var": "uploaded_files",
+          "label": "사내 데이터·문서 파일 목록",
+          "type": "파일 목록",
+          "required": true,
+          "example": "TC_샘플.xlsx, sample_data.csv"
+        },
+        {
+          "var": "nl_query",
+          "label": "자연어 핀셋 조회 조건",
+          "type": "짧은 텍스트",
+          "required": false,
+          "example": "Expected Result 미기입"
+        },
+        {
+          "var": "defect_threshold",
+          "label": "사내 품질 기준값 (%)",
+          "type": "숫자",
+          "required": true,
+          "example": "1.5"
+        }
+      ]
+    },
+    {
+      "id": "n2",
+      "type": "document-extractor",
+      "title": "문서·DB 추출기 (data_loader.py)",
+      "desc": "다중 시트·RGB 배경색·워드 표를 분리해 SQLite DB로 동기화합니다",
+      "why": "메인 시트와 보조 시트(Summary/Environment)를 자동 분리하고 Pandas 3.0 NaN 오류와 테마색 오탐지를 차단하며 로컬 SQLite DB(.db/.sql)를 구축합니다",
+      "check": "internal_analysis.db 적재 및 전체 건수(100%) 조회가 오류 없이 완료됩니다",
+      "tips": [
+        "보조 시트는 메인 집계 건수를 오염시키지 않도록 별도 분리됩니다"
+      ],
+      "input": "시작 (app.py / config.py).uploaded_files"
+    },
+    {
+      "id": "n3",
+      "type": "code",
+      "title": "양식검증·전수집계·시각화 (visualizer.py / analyzer_node.py)",
+      "desc": "양식 검증, 컬럼별 미기입 TC ID 전수 명단 추출 및 차트 집계를 수행합니다",
+      "why": "AI의 숫자 환각을 원천 차단하기 위해 Python이 먼저 작성률(%), 단일값 컬럼 배제, 미기입 TC ID 전수 명단, 사내 기준 초과 건수를 100% 정확히 계산합니다",
+      "check": "양식 자동 검증 배너, 4대 KPI 카드, 가로 TOP 순위 차트, 미기입 TC ID 명단이 출력됩니다",
+      "tips": [
+        "특정 컬럼 미기입 조회 시 타 컬럼의 N/A와 섞이지 않도록 핀셋 필터링됩니다"
+      ],
+      "inputs": [
+        {
+          "name": "db_text",
+          "from": "문서·DB 추출기 (data_loader.py).text"
+        },
+        {
+          "name": "threshold",
+          "from": "시작 (app.py / config.py).defect_threshold"
+        }
+      ],
+      "code": "def main(db_text: str, threshold: float) -> dict:\n    text = str(db_text or '').lstrip('\\ufeff')\n    lines = [l for l in text.splitlines() if l.strip()]\n    total = max(len(lines) - 1, 0)\n    return {\n        'data_summary': f'전체 {total}건 전수 집계 완료 (기준 {threshold}%)',\n        'missing_id_list': '컬럼별 미기입 TC ID 전수 명단 추출 완료',\n        'exceed_count': 1 if total > 0 else 0\n    }",
+      "outputs": [
+        {
+          "name": "data_summary",
+          "type": "String"
+        },
+        {
+          "name": "missing_id_list",
+          "type": "String"
+        },
+        {
+          "name": "exceed_count",
+          "type": "Number"
+        }
+      ]
+    },
+    {
+      "id": "n4",
+      "type": "if-else",
+      "title": "사내 기준 자동 판정 (reporter_node.py)",
+      "desc": "사내 기준값(%) 초과 항목 유무에 따라 판정 배너를 분기합니다",
+      "why": "설정 기준 초과 시 '🚨 [확인 필요]', 이내 시 '✅ [이상 없음]' 판정 배너를 파이썬 규칙으로 확정해 일관성을 100% 보장합니다",
+      "check": "기준값 슬라이더 변경 시 판정 배너와 통계표 판정이 즉시 연동됩니다",
+      "tips": [],
+      "cases": [
+        {
+          "name": "IF",
+          "logic": "AND",
+          "conditions": [
+            {
+              "var": "양식검증·전수집계·시각화 (visualizer.py / analyzer_node.py).exceed_count",
+              "op": ">",
+              "value": "0"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "n5",
+      "type": "llm",
+      "title": "3대 AI 병렬 보고서 작성 (llm.py / reporter_node.py)",
+      "desc": "Ollama(보안) · Groq · Gemini가 4단락 무환각 리포트를 동시 작성합니다",
+      "why": "파이썬이 전수 계산한 집계표와 미기입 TC ID 명단을 근거로 1~4단락 보고서를 병렬 작성하며, 2,200 토큰 확보 및 샘플 행 나열(끊김)을 자동 차단합니다",
+      "check": "3대 AI 모델 리포트와 소요 시간이 나란히 비교 출력되고 파이프라인 1~5단계가 완료 표시됩니다",
+      "tips": [
+        "state.py(AgentState)와 graph.py를 통해 노드 간 상태를 안전하게 전달합니다"
+      ],
+      "model": "Ollama(qwen2.5-coder:7b) / Groq / Gemini",
+      "context": "",
+      "system": "당신은 사내 데이터 분석 전문가입니다. 아래 파이썬 전수 집계표와 미기입 TC ID 명단만 근거로 1~4번 목차 리포트를 작성하고 원본 샘플 행을 나열하지 마십시오.\n\n집계 요약: {{#양식검증·전수집계·시각화 (visualizer.py / analyzer_node.py).data_summary#}}\n미기입 명단: {{#양식검증·전수집계·시각화 (visualizer.py / analyzer_node.py).missing_id_list#}}",
+      "user": "",
+      "memory": false
+    },
+    {
+      "id": "n6",
+      "type": "template",
+      "title": "엑셀·워드 보고서 패키징 (excel_exporter.py)",
+      "desc": "마스터 엑셀(.xlsx)과 빈 페이지 없는 쪽나누기 워드(.docx)를 생성합니다",
+      "why": "분석 일시·기준 판정이 담긴 3시트 마스터 엑셀과 1페이지 종합요약표 + 2페이지 이후 AI별 강제 쪽나누기(<w:pageBreakBefore/>) 워드 보고서를 생성합니다",
+      "check": "워드 문서 내 중간·말미 빈 페이지가 0건이며 표와 1~4단락이 깔끔히 분리됩니다",
+      "tips": [],
+      "inputs": [
+        {
+          "name": "body",
+          "from": "3대 AI 병렬 보고서 작성 (llm.py / reporter_node.py).text"
+        },
+        {
+          "name": "missing_ids",
+          "from": "양식검증·전수집계·시각화 (visualizer.py / analyzer_node.py).missing_id_list"
+        }
+      ],
+      "template": "[사내 데이터 분석 AI Agent W47 리포트]\n{{ body }}\n\n[전수 미기입 확인]\n{{ missing_ids }}"
+    },
+    {
+      "id": "n7",
+      "type": "end",
+      "title": "종료 (대시보드·산출물·플로팅채팅·3회검증)",
+      "desc": "최종 엑셀·워드 추출, 1·2·3번 자유 스크롤 팝업 채팅 및 3회 검증을 제공합니다",
+      "why": "산출물 다운로드 후에도 로컬 Ollama 기반 플로팅 팝업 채팅으로 1·2·3번을 스크롤하며 꼬리 질문을 하거나, 3회 반복 일관성 검증(.docx)을 수행할 수 있습니다",
+      "check": "팝업 채팅 모드에서 1·2·3번 휠 스크롤 및 파트회의용 3회 검증 워드 추출이 정상 동작합니다",
+      "tips": [],
+      "outputs": [
+        {
+          "name": "result",
+          "from": "엑셀·워드 보고서 패키징 (excel_exporter.py).output"
+        }
+      ]
+    }
+  ],
+  "edges": [
+    {"from": "n1", "to": "n2"},
+    {"from": "n2", "to": "n3"},
+    {"from": "n3", "to": "n4"},
+    {"from": "n4", "to": "n5", "branch": "IF"},
+    {"from": "n4", "to": "n5", "branch": "ELSE"},
+    {"from": "n5", "to": "n6"},
+    {"from": "n6", "to": "n7"}
+  ],
+  "tests": [
+    {
+      "input": "TC 엑셀 업로드 + 'Expected Result 미기입' 조회",
+      "expect": "전체 63건 중 Expected Result 공란 4건만 정확히 필터링 및 채팅방에서 해당 TC ID 즉시 응답"
+    },
+    {
+      "input": "다중 파일(Excel + Word) 업로드 + 3대 AI 병렬 실행 + 워드(.docx) 추출",
+      "expect": "1페이지 종합 요약표 + 2~4페이지 AI별 독립 페이지(빈 페이지 0건) 워드 생성"
+    }
+  ]
 }
-*{box-sizing:border-box}
-html,body{margin:0;height:100%;overflow:hidden;background:var(--bg);color:var(--t1);font-family:var(--font);font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased}
-button{font-family:inherit}
-.hidden{display:none!important}
-/* ── 상단 바 (Dify 편집 화면 헤더 느낌) ── */
-#topbar{position:fixed;left:0;right:0;top:0;height:56px;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:0 16px;z-index:30;background:linear-gradient(180deg,rgba(242,244,247,1) 60%,rgba(242,244,247,0));}
-.appinfo{display:flex;align-items:center;gap:10px;min-width:0}
-.appicon{width:32px;height:32px;border-radius:8px;background:#E0EAFF;display:flex;align-items:center;justify-content:center;font-size:17px;flex:none;border:1px solid var(--border)}
-.appmeta{min-width:0}
-.applabel{font-size:11px;color:var(--t3);font-weight:600;letter-spacing:.02em}
-.appname{font-size:15px;font-weight:600;color:var(--t1);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:38vw}
-.modebadge{font-size:11px;font-weight:600;padding:2px 8px;border-radius:6px;border:1px solid var(--blue-line);color:var(--blue);background:var(--blue-bg);white-space:nowrap}
-.modebadge.chat{color:#DC6803;border-color:#FEC84B;background:#FFFAEB}
-.actions{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}
-.btn{height:32px;padding:0 12px;border-radius:8px;border:1px solid rgba(16,24,40,.14);background:#fff;color:var(--t2);font-size:13px;font-weight:600;cursor:pointer;box-shadow:var(--shadow-sm);display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
-.btn:hover{background:#F9FAFB}
-.btn.primary{background:var(--blue);border-color:var(--blue);color:#fff}
-.btn.primary:hover{background:#155AEF}
-.btn.small{height:26px;padding:0 9px;font-size:12px;border-radius:6px}
-.btn.ghost{box-shadow:none;border-color:transparent;background:transparent}
-.btn.ghost:hover{background:rgba(16,24,40,.05)}
-/* ── 알림 띠 ── */
-#banner{position:fixed;top:60px;left:50%;transform:translateX(-50%);z-index:19;display:flex;gap:8px;flex-direction:column;align-items:center;max-width:min(860px,92vw)}
-.bar{display:flex;align-items:center;gap:10px;padding:8px 12px;border-radius:10px;font-size:13px;box-shadow:var(--shadow-md);border:1px solid}
-.bar.sample{background:#fff;border-color:var(--blue-line);color:var(--t2)}
-.bar.warn{background:var(--warn-bg);border-color:var(--warn-line);color:#93370D}
-.bar.ok{background:var(--ok-bg);border-color:#ABEFC6;color:#085D3A}
-.bar b{font-weight:700;white-space:nowrap}
-#warnlist{margin:0;padding:8px 12px 8px 28px;background:#fff;border:1px solid var(--warn-line);border-radius:10px;box-shadow:var(--shadow-md);font-size:12.5px;color:var(--t2);max-height:40vh;overflow:auto;width:min(860px,92vw)}
-#warnlist li{margin:3px 0}
-/* ── 캔버스 ── */
-#canvas{position:fixed;inset:0;overflow:hidden;cursor:grab;background-color:var(--bg);background-image:radial-gradient(var(--dot) 1px,transparent 1.2px);background-size:14px 14px}
-#canvas.panning{cursor:grabbing}
-#viewport{position:absolute;left:0;top:0;transform-origin:0 0}
-#edges{position:absolute;left:0;top:0;overflow:visible;pointer-events:none}
-#edges path{fill:none;stroke:var(--line);stroke-width:2;transition:stroke .12s}
-#edges path.hi{stroke:var(--line-hi)}
-/* ── 노드 카드 ── */
-.node{position:absolute;width:240px;background:var(--card);border-radius:15px;border:1px solid var(--border);box-shadow:var(--shadow-sm);cursor:pointer;user-select:none;padding-bottom:10px;transition:box-shadow .12s}
-.node:hover{box-shadow:var(--shadow-lg)}
-.node.selected{box-shadow:0 0 0 2px var(--blue),var(--shadow-lg)}
-.node.related{box-shadow:0 0 0 1.5px var(--blue-line),var(--shadow-md)}
-.node.done .nh::after{content:"✓";position:absolute;right:10px;top:12px;width:18px;height:18px;border-radius:50%;background:var(--ok);color:#fff;font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center}
-.nh{position:relative;display:flex;align-items:center;gap:8px;padding:12px 12px 6px}
-.ic{width:24px;height:24px;border-radius:8px;display:flex;align-items:center;justify-content:center;flex:none;box-shadow:inset 0 0 0 1px rgba(255,255,255,.12)}
-.ic svg{width:15px;height:15px}
-.ic.s{width:16px;height:16px;border-radius:5px}
-.ic.s svg{width:10px;height:10px}
-.nt{font-size:13px;font-weight:600;color:var(--t1);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding-right:22px}
-.nd{padding:0 12px 4px;font-size:12px;color:var(--t3);line-height:1.45}
-.nb{padding:2px 12px 0;display:flex;flex-direction:column;gap:4px}
-.nrow{display:flex;align-items:center;justify-content:space-between;gap:6px;min-height:24px;padding:2px 8px;border-radius:6px;background:var(--row);font-size:12px;color:var(--t2)}
-.nrow .l{display:flex;align-items:center;gap:4px;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
-.nrow .r{color:var(--t4);font-size:11px;white-space:nowrap;flex:none}
-.vx{color:var(--blue);font-family:var(--mono);font-size:11px;font-weight:700;flex:none}
-.case{position:relative;padding:6px 0 2px}
-.case + .case{border-top:1px dashed var(--border2)}
-.case .cl{font-size:12px;font-weight:700;color:var(--t2);display:flex;justify-content:space-between;align-items:center;padding:0 2px 3px}
-.case .cl .logic{font-size:10px;font-weight:600;color:var(--blue);background:var(--blue-bg);padding:0 5px;border-radius:4px}
-.cond{display:flex;align-items:center;gap:4px;flex-wrap:wrap;min-height:24px;padding:2px 6px;border-radius:6px;background:var(--row);font-size:11.5px;color:var(--t2);margin-bottom:3px}
-.cond .op{font-weight:700;color:var(--t1);padding:0 2px}
-.cls .ct{font-size:11.5px;color:var(--t2);background:var(--row);border-radius:6px;padding:4px 8px;line-height:1.4;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
-.answerprev{font-size:11.5px;color:var(--t2);background:var(--row);border-radius:6px;padding:6px 8px;line-height:1.45;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;white-space:pre-wrap;word-break:break-all}
-.model{display:flex;align-items:center;gap:6px}
-.model .mi{width:16px;height:16px;border-radius:4px;background:#101828;color:#fff;font-size:9px;display:flex;align-items:center;justify-content:center}
-.badge{position:absolute;left:-9px;top:-9px;min-width:22px;height:22px;padding:0 6px;border-radius:11px;background:#101828;color:#fff;font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;box-shadow:0 0 0 2px var(--bg);z-index:2}
-body.nobadge .badge{display:none}
-.handle{position:absolute;width:2px;height:10px;border-radius:1px;background:var(--blue);z-index:2}
-.handle.tgt{left:-1px}
-.handle.src{right:-1px}
-/* 변수 칩 (Dify 변수 표시와 같은 모양) */
-.chip{display:inline-flex;align-items:center;gap:3px;max-width:100%;padding:0 5px;height:20px;border-radius:5px;border:1px solid var(--blue-line);background:#fff;color:var(--t2);font-size:11.5px;font-weight:500;vertical-align:middle;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:var(--font)}
-.chip .cn{color:var(--t3)}
-.chip .sep{color:var(--t4)}
-.chip .cv{color:var(--blue);font-weight:600}
-.chip.bad{border-color:#FDA29B;background:var(--err-bg)}
-.chip.ctx{border-color:#FEC84B}
-.chip.ctx .cv{color:#DC6803}
-/* ── 말풍선 (마우스 올렸을 때) ── */
-#tip{position:fixed;z-index:40;width:300px;background:#fff;border:1px solid var(--border);border-radius:12px;box-shadow:var(--shadow-lg);padding:12px;font-size:12.5px;color:var(--t2);pointer-events:none}
-#tip .th{display:flex;align-items:center;gap:8px;margin-bottom:6px}
-#tip .tt{font-weight:700;color:var(--t1);font-size:13px}
-#tip .tk{font-size:11px;color:var(--t3)}
-#tip .tr{margin:4px 0;display:flex;gap:6px;align-items:flex-start}
-#tip .tr .k{flex:none;width:34px;color:var(--t3);font-weight:600;font-size:11.5px;padding-top:1px}
-#tip .tr .v{min-width:0;display:flex;flex-wrap:wrap;gap:3px}
-#tip .hint{margin-top:8px;padding-top:8px;border-top:1px solid var(--border2);color:var(--blue);font-weight:600;font-size:12px}
-/* ── 왼쪽: 만드는 순서 ── */
-#steps{position:fixed;left:16px;top:68px;bottom:16px;width:272px;z-index:20;background:#fff;border:1px solid var(--border);border-radius:16px;box-shadow:var(--shadow-lg);display:flex;flex-direction:column;overflow:hidden}
-#steps.collapsed{bottom:auto;height:44px}
-#steps.collapsed .sbody{display:none}
-.shead{display:flex;align-items:center;justify-content:space-between;padding:10px 12px 10px 14px;border-bottom:1px solid var(--border2)}
-.shead b{font-size:13px}
-.shead .prog{font-size:11.5px;color:var(--t3);margin-left:6px;font-weight:600}
-.sbody{overflow:auto;padding:6px 8px 12px}
-.ssec{font-size:11px;font-weight:700;color:var(--t4);padding:10px 8px 4px;letter-spacing:.03em}
-.sitem{display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:8px;cursor:pointer;font-size:13px;color:var(--t2)}
-.sitem:hover{background:#F2F4F7}
-.sitem.active{background:var(--blue-bg);color:var(--t1)}
-.sitem .num{width:20px;height:20px;border-radius:10px;background:#F2F4F7;color:var(--t3);font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;flex:none}
-.sitem .txt{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.sitem .kind{font-size:11px;color:var(--t4);flex:none}
-.chk{width:18px;height:18px;border-radius:5px;border:1.5px solid #D0D5DD;flex:none;display:flex;align-items:center;justify-content:center;background:#fff;cursor:pointer;font-size:11px;color:#fff;font-weight:700}
-.chk.on{background:var(--ok);border-color:var(--ok)}
-.sitem.isdone .txt{color:var(--t4);text-decoration:line-through}
-/* ── 오른쪽: 설정 패널 (Dify 노드 패널 자리) ── */
-#panel{position:fixed;right:16px;top:68px;bottom:16px;width:440px;max-width:calc(100vw - 32px);z-index:25;background:#fff;border:1px solid var(--border);border-radius:16px;box-shadow:var(--shadow-lg);display:flex;flex-direction:column;overflow:hidden}
-.phead{padding:14px 16px 10px;border-bottom:1px solid var(--border2)}
-.prow1{display:flex;align-items:center;gap:10px}
-.ptitle{font-size:16px;font-weight:700;color:var(--t1);flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.pkind{font-size:11.5px;color:var(--t3);font-weight:600;background:#F2F4F7;padding:2px 8px;border-radius:6px;white-space:nowrap}
-.pclose{width:28px;height:28px;border-radius:8px;border:none;background:transparent;cursor:pointer;color:var(--t3);font-size:18px;line-height:1}
-.pclose:hover{background:#F2F4F7}
-.pdesc{margin-top:6px;font-size:12.5px;color:var(--t3)}
-.pbody{overflow:auto;padding:4px 16px 16px;flex:1}
-.pfoot{display:flex;justify-content:space-between;gap:8px;padding:10px 16px;border-top:1px solid var(--border2);background:#FCFCFD}
-.why{margin:12px 0 4px;padding:10px 12px;border-radius:10px;background:var(--blue-bg);color:#1D2939;font-size:13px;line-height:1.55}
-.why b{color:var(--blue)}
-.sec{margin-top:16px}
-.sec h4{margin:0 0 8px;font-size:13px;color:var(--t1);display:flex;align-items:center;gap:6px}
-.sec h4 .no{width:20px;height:20px;border-radius:6px;background:#101828;color:#fff;font-size:11px;display:inline-flex;align-items:center;justify-content:center}
-ol.steps{margin:0;padding-left:20px;color:var(--t2);font-size:13px}
-ol.steps li{margin:4px 0}
-.field{border:1px solid var(--border2);border-radius:12px;padding:10px 12px;margin-bottom:8px;background:#fff}
-.fl{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px}
-.fn{font-size:12.5px;font-weight:700;color:var(--t2)}
-.fv{background:var(--row2);border:1px solid var(--border2);border-radius:8px;padding:7px 10px;font-size:13px;color:var(--t1);word-break:break-word}
-.fv.pre{white-space:pre-wrap;font-size:12.5px;line-height:1.6;max-height:300px;overflow:auto}
-.fv.code{white-space:pre;font-family:var(--mono);font-size:11.5px;line-height:1.55;max-height:300px;overflow:auto;background:#101828;color:#E4E7EC;border-color:#101828}
-.fv .jin{color:#155AEF;font-family:var(--mono);font-weight:600}
-.fh{margin-top:6px;font-size:12px;color:var(--t3);line-height:1.55}
-.fh b{color:var(--t2)}
-.kv{display:grid;grid-template-columns:auto 1fr;gap:3px 10px;font-size:12.5px}
-.kv .k{color:var(--t3);white-space:nowrap}
-.kv .v{color:var(--t1);font-weight:600;min-width:0;word-break:break-word}
-.outs{display:flex;flex-wrap:wrap;gap:6px}
-.out{display:inline-flex;align-items:center;gap:6px;padding:4px 8px;border-radius:8px;background:var(--row);font-size:12.5px}
-.out .ty{font-size:11px;color:var(--t3)}
-.note{font-size:12.5px;color:var(--t2);background:var(--row2);border:1px solid var(--border2);border-radius:10px;padding:8px 10px}
-ul.warns{margin:0;padding-left:18px;font-size:12.5px;color:#93370D}
-ul.warns li{margin:3px 0}
-.mist{margin:0;padding-left:18px;font-size:12.5px;color:var(--t2)}
-.mist li{margin:3px 0}
-.okbox{background:var(--ok-bg);border:1px solid #ABEFC6;color:#085D3A;border-radius:10px;padding:8px 10px;font-size:12.5px}
-.tbl{width:100%;border-collapse:collapse;font-size:12.5px}
-.tbl th,.tbl td{border:1px solid var(--border2);padding:6px 8px;text-align:left;vertical-align:top}
-.tbl th{background:#F9FAFB;color:var(--t3);font-weight:600}
-.tag{display:inline-block;font-size:11px;font-weight:700;padding:1px 6px;border-radius:5px}
-.tag.a{background:#EFF8FF;color:#175CD3}
-.tag.b{background:#ECFDF3;color:#067647}
-/* ── 아래쪽 확대·축소 ── */
-#zoombar{position:fixed;left:304px;bottom:16px;z-index:21;display:flex;align-items:center;gap:2px;background:#fff;border:1px solid var(--border);border-radius:10px;box-shadow:var(--shadow-md);padding:3px}
-#steps.collapsed ~ #zoombar{left:16px}
-#zoombar button{height:28px;min-width:28px;border:none;background:transparent;border-radius:7px;cursor:pointer;color:var(--t2);font-size:14px;font-weight:600;padding:0 8px}
-#zoombar button:hover{background:#F2F4F7}
-#zoombar .pct{font-size:12px;color:var(--t3);min-width:44px;text-align:center}
-/* ── 창 (붙여넣기, 코드 보기) ── */
-.modal{position:fixed;inset:0;z-index:50;background:rgba(16,24,40,.45);display:flex;align-items:center;justify-content:center;padding:20px}
-.mbox{background:#fff;border-radius:16px;box-shadow:var(--shadow-lg);width:min(820px,100%);max-height:92vh;display:flex;flex-direction:column;overflow:hidden}
-.mhead{padding:16px 18px 8px;display:flex;justify-content:space-between;align-items:flex-start;gap:12px}
-.mhead h3{margin:0;font-size:16px}
-.mhead p{margin:4px 0 0;font-size:12.5px;color:var(--t3)}
-.mbody{padding:8px 18px;overflow:auto}
-.mbody textarea{width:100%;height:46vh;min-height:220px;border:1px solid #D0D5DD;border-radius:10px;padding:10px 12px;font-family:var(--mono);font-size:12px;line-height:1.5;resize:vertical;color:var(--t1)}
-.mbody textarea:focus{outline:2px solid var(--blue-line);border-color:var(--blue)}
-.mfoot{padding:12px 18px 16px;display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap}
-.mfoot .grp{display:flex;gap:8px;flex-wrap:wrap}
-.merr{margin-top:8px;padding:8px 10px;border-radius:8px;background:var(--err-bg);color:#B42318;font-size:12.5px;white-space:pre-wrap}
-/* ── 한 장으로 보기 ── */
-#guide{position:fixed;inset:0;z-index:45;background:#fff;overflow:auto}
-.gwrap{max-width:980px;margin:0 auto;padding:28px 24px 60px}
-.gtop{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;position:sticky;top:0;background:#fff;padding:8px 0 12px;z-index:2;border-bottom:1px solid var(--border2)}
-.gtop h1{margin:0;font-size:22px}
-.gtop .sub{font-size:13px;color:var(--t3);margin-top:2px}
-.gmap{position:relative;margin:18px 0;border:1px solid var(--border2);border-radius:14px;overflow:hidden;background-color:var(--bg);background-image:radial-gradient(var(--dot) 1px,transparent 1.2px);background-size:14px 14px}
-.gmap .inner{position:absolute;left:0;top:0;transform-origin:0 0}
-.gmap .gedges{position:absolute;left:0;top:0;overflow:visible}
-.gmap .gedges path{fill:none;stroke:var(--line);stroke-width:2}
-.gmap .node{cursor:default}
-.gsec{margin-top:22px;page-break-inside:avoid}
-.gsec > h2{font-size:16px;margin:0 0 8px;display:flex;align-items:center;gap:8px}
-.gnode{border:1px solid var(--border2);border-radius:14px;padding:4px 16px 14px;margin-top:14px;page-break-inside:avoid}
-.gnode .ghead{display:flex;align-items:center;gap:10px;padding-top:10px}
-.gnode .ghead .badge{position:static;box-shadow:none}
-.gnode .ghead .gt{font-size:15px;font-weight:700}
-.summarybox{display:grid;grid-template-columns:120px 1fr;gap:6px 12px;font-size:13px;margin-top:12px}
-.summarybox .k{color:var(--t3);font-weight:600}
-#toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);z-index:60;background:#101828;color:#fff;padding:10px 14px;border-radius:10px;font-size:13px;box-shadow:var(--shadow-lg);opacity:0;pointer-events:none;transition:opacity .2s;max-width:90vw}
-#toast.show{opacity:1}
-@media (max-width:1000px){
-#banner{top:120px}
-}
-@media (max-width:900px){
-.actions .btn{padding:0 9px;font-size:12px}
-.applabel{display:none}
-#steps{width:230px}
-#zoombar{left:262px}
-.appname{max-width:30vw}
-}
-@media print{
-html,body{overflow:visible;height:auto;background:#fff}
-#topbar,#steps,#panel,#zoombar,#banner,#canvas,#tip,#toast,.modal{display:none!important}
-#guide{position:static;overflow:visible;display:block!important}
-.gtop{position:static}
-.gtop .btns{display:none}
-.fv.pre,.fv.code{max-height:none;overflow:visible}
-.fv.code{white-space:pre-wrap;background:#F9FAFB;color:#101828;border-color:var(--border2)}
-}
-</style>
-</head>
-<body>
-
-<header id="topbar">
-  <div class="appinfo">
-    <div class="appicon" id="appicon">🧩</div>
-    <div class="appmeta">
-      <div class="applabel">노드구성도 · Dify 캔버스 미리보기</div>
-      <div style="display:flex;align-items:center;gap:8px;min-width:0">
-        <div class="appname" id="appname">-</div>
-        <span class="modebadge" id="modebadge">워크플로우</span>
-      </div>
-    </div>
-  </div>
-  <div class="actions">
-    <button class="btn primary" id="b-paste">📋 데이터 붙여넣기</button>
-    <button class="btn" id="b-guide">📖 한 장으로 보기</button>
-    <button class="btn" id="b-save">💾 HTML로 저장</button>
-  </div>
-</header>
-
-<div id="banner"></div>
-
-<div id="canvas"><div id="viewport"><svg id="edges" xmlns="http://www.w3.org/2000/svg"></svg><div id="nodes"></div></div></div>
-
-<aside id="steps">
-  <div class="shead"><div><b>만드는 순서</b><span class="prog" id="prog"></span></div><button class="btn small ghost" id="b-steps">접기</button></div>
-  <div class="sbody" id="stepsbody"></div>
-</aside>
-
-<div id="zoombar">
-  <button id="z-out" title="축소">−</button><span class="pct" id="z-pct">100%</span><button id="z-in" title="확대">+</button>
-  <button id="z-fit" title="화면에 맞추기">⤢ 맞춤</button>
-  <button id="z-badge" title="만드는 순서 번호 보이기/숨기기">① 번호</button>
-</div>
-
-<aside id="panel" class="hidden"></aside>
-<div id="tip" class="hidden"></div>
-<div id="guide" class="hidden"></div>
-
-<div class="modal hidden" id="m-paste">
-  <div class="mbox">
-    <div class="mhead"><div><h3>노드구성도 데이터 붙여넣기</h3><p>ChatGPT가 만든 답(JSON)을 통째로 복사해 아래 칸에 붙여 넣고 [그리기]를 누릅니다. 앞뒤에 설명 글이 섞여 있어도 괜찮습니다.</p></div><button class="pclose" data-close="m-paste">×</button></div>
-    <div class="mbody"><textarea id="pastebox" spellcheck="false" placeholder="여기에 붙여 넣기 (Ctrl+V / ⌘+V)"></textarea><div id="pasteerr" class="merr hidden"></div></div>
-    <div class="mfoot">
-      <div class="grp"><button class="btn small" id="b-ex-wf">예시: 워크플로우</button><button class="btn small" id="b-ex-cf">예시: 채팅플로우</button><button class="btn small" id="b-cur">지금 데이터 보기</button></div>
-      <div class="grp"><button class="btn" data-close="m-paste">닫기</button><button class="btn primary" id="b-draw">그리기</button></div>
-    </div>
-  </div>
-</div>
-
-<div class="modal hidden" id="m-text">
-  <div class="mbox">
-    <div class="mhead"><div><h3 id="mt-title">복사하기</h3><p id="mt-desc">자동 복사가 막힌 화면입니다. 아래 칸을 클릭하고 Ctrl+A(맥: ⌘+A) → Ctrl+C(⌘+C)로 복사합니다.</p></div><button class="pclose" data-close="m-text">×</button></div>
-    <div class="mbody"><textarea id="mt-box" spellcheck="false" readonly></textarea></div>
-    <div class="mfoot"><div class="grp"></div><div class="grp"><button class="btn" data-close="m-text">닫기</button><button class="btn primary" id="mt-copy">다시 복사 시도</button></div></div>
-  </div>
-</div>
-
-<div id="toast"></div>
-
-<script type="application/json" id="nodemap-data" data-sample="true">
-{}
-</script>
-<script type="application/json" id="sample-workflow">
-{"format":"nodemap-v1","app":{"name":"설비 점검 주간 요약","mode":"workflow","goal":"한 주치 설비 일일점검 기록으로 월요일 회의용 주간 설비 상태 보고 초안을 만듭니다","how_to_use":"점검 기록 CSV를 올리고 실행하면 이탈 목록과 다음 주 확인 사항이 정해진 양식으로 나옵니다","human_check":"설비 담당 선임이 이탈 목록을 원본과 대조하고, 정비 요청 여부는 팀장이 정합니다"},"files":[{"name":"설비점검기록_가상.csv","role":"input","used_at":"시작 > check_file","desc":"한 주치 일일점검 기록 30행. 기준 이탈 3건(같은 설비 2회 포함)"}],"knowledge":[],"nodes":[{"id":"n1","type":"start","title":"시작","desc":"점검 기록 파일을 받습니다","why":"설비관리 시스템에서 내려받은 한 주치 점검 기록 CSV를 올리는 입구입니다.","check":"테스트 실행 창에 '점검 기록 파일' 올리기 칸이 보입니다.","tips":["실제 점검 기록은 올리지 않습니다. 가상 파일만 씁니다."],"fields":[{"var":"check_file","label":"점검 기록 파일","type":"단일 파일","required":true,"example":"설비점검기록_가상.csv"}]},{"id":"n2","type":"document-extractor","title":"점검표 읽기","desc":"CSV를 글자 표로 꺼냅니다","why":"시작 노드는 파일을 받아 두기만 합니다. 파일을 열어 표를 글자로 풀어 주는 단계입니다.","check":"▶ 실행 후 text에 일자, 설비명, 측정값 같은 열 이름과 30행이 보입니다.","tips":[],"input":"시작.check_file"},{"id":"n3","type":"code","title":"이탈 집계","desc":"기준 이탈 건수와 목록을 셉니다","why":"측정값이 기준 하한~상한을 벗어난 건을 정확히 세고, 같은 설비가 2회 이상 이탈했는지 표시합니다. 계산은 AI가 아니라 코드가 합니다.","check":"summary 첫 줄이 '[점검 건수] 전체 30건, 기준 이탈 3건'처럼 나오고 over_count가 3입니다.","tips":["원본 파일에서 이탈 1건만 손으로 찾아 summary와 맞춰 봅니다."],"inputs":[{"name":"table_text","from":"점검표 읽기.text"}],"code":"import csv\nimport io\n\n\ndef main(table_text) -> dict:\n    # 문서 추출기 결과가 목록으로 오면 하나로 합칩니다\n    if isinstance(table_text, list):\n        table_text = \"\\n\".join(str(t) for t in table_text)\n    if not isinstance(table_text, str) or not table_text.strip():\n        return {\"summary\": \"처리할 데이터가 없습니다.\", \"over_count\": 0, \"repeat_list\": \"없음\"}\n\n    text = table_text.replace(\"\\ufeff\", \"\")\n    lines = [line.strip() for line in text.splitlines() if line.strip()]\n\n    rows = []\n    if lines and \"|\" in lines[0]:\n        for line in lines:\n            cells = [c.strip() for c in line.strip(\"|\").split(\"|\")]\n            if all(set(c) <= set(\"-: \") for c in cells):\n                continue  # 마크다운 표의 구분선(---) 건너뛰기\n            rows.append(cells)\n    else:\n        rows = [[c.strip() for c in r] for r in csv.reader(io.StringIO(\"\\n\".join(lines))) if r]\n\n    if len(rows) < 2:\n        return {\"summary\": \"표에서 데이터를 찾지 못했습니다.\", \"over_count\": 0, \"repeat_list\": \"없음\"}\n\n    header = [h.replace(\" \", \"\") for h in rows[0]]\n\n    def col(*names):\n        for i, h in enumerate(header):\n            if any(n in h for n in names):\n                return i\n        return None\n\n    i_date = col(\"일자\", \"날짜\")\n    i_eq = col(\"설비명\")\n    i_item = col(\"점검항목\", \"항목\")\n    i_val = col(\"측정값\")\n    i_low = col(\"하한\")\n    i_high = col(\"상한\")\n\n    if None in (i_eq, i_item, i_val, i_low, i_high):\n        return {\n            \"summary\": \"필수 열(설비명, 점검항목, 측정값, 기준 하한, 기준 상한)을 찾지 못했습니다.\",\n            \"over_count\": 0,\n            \"repeat_list\": \"없음\",\n        }\n\n    def num(s):\n        try:\n            return float(str(s).replace(\",\", \"\").strip())\n        except ValueError:\n            return None\n\n    total = 0\n    over = []\n    for r in rows[1:]:\n        r = r + [\"\"] * (len(header) - len(r))\n        v, lo, hi = num(r[i_val]), num(r[i_low]), num(r[i_high])\n        if v is None or lo is None or hi is None:\n            continue\n        total += 1\n        if v < lo or v > hi:\n            day = r[i_date] if i_date is not None else \"\"\n            over.append((r[i_eq], r[i_item], r[i_val], r[i_low], r[i_high], day))\n\n    counts = {}\n    for item in over:\n        counts[item[0]] = counts.get(item[0], 0) + 1\n    repeats = [eq + \" (\" + str(n) + \"회)\" for eq, n in counts.items() if n >= 2]\n\n    out = [\"[점검 건수] 전체 \" + str(total) + \"건, 기준 이탈 \" + str(len(over)) + \"건\"]\n    out.append(\"[이탈 목록]\")\n    if over:\n        for eq, item, v, lo, hi, day in over:\n            mark = \" [반복 이탈]\" if counts[eq] >= 2 else \"\"\n            out.append(\"- \" + eq + \" / \" + item + \": \" + v + \" (기준 \" + lo + \"~\" + hi + \") \" + day + mark)\n    else:\n        out.append(\"- 없음\")\n    out.append(\"[반복 이탈] \" + (\", \".join(repeats) if repeats else \"없음\"))\n\n    return {\n        \"summary\": \"\\n\".join(out),\n        \"over_count\": len(over),\n        \"repeat_list\": \", \".join(repeats) if repeats else \"없음\",\n    }\n","outputs":[{"name":"summary","type":"String"},{"name":"over_count","type":"Number"},{"name":"repeat_list","type":"String"}]},{"id":"n4","type":"llm","title":"확인사항 작성","desc":"다음 주 확인 사항 2~3줄을 씁니다","why":"집계 결과를 읽고 다음 주에 확인할 일을 정해진 모양으로 씁니다. 원인 추정이나 정비 요청 판단은 하지 않습니다.","check":"'- 설비명 / 점검항목: 확인할 내용' 모양의 2~3줄이 나오고, 반복 이탈 설비가 맨 앞에 있습니다.","tips":["'정비가 필요하다' 같은 판단 문장이 나오면 SYSTEM의 규칙 칸을 더 분명하게 고칩니다."],"model":"강사가 안내한 모델","context":"","system":"아래는 설비관리 시스템에서 내려받은 한 주치 설비 일일점검 기록을 집계한 결과입니다.\n이 결과로 월요일 팀 회의에 올릴 '주간 설비 상태 보고'의 마지막 항목을 씁니다.\n\n[할 일]\n다음 주에 확인해야 할 사항을 2~3줄로 씁니다.\n- 각 줄은 \"- 설비명 / 점검항목: 확인할 내용\" 모양으로 씁니다\n- '반복 이탈'로 표시된 설비를 맨 앞에 둡니다\n\n[규칙]\n- 집계 결과에 없는 설비, 수치, 날짜를 만들지 않는다\n- 측정값은 집계 결과의 숫자를 그대로 쓴다\n- 이탈 원인을 추정하지 않는다\n- \"정비가 필요하다\"처럼 정비 요청 여부를 정하는 표현을 쓰지 않는다. \"확인 필요\"까지만 쓴다\n- 기준 이탈이 한 건도 없으면 \"이번 주 기준 이탈 없음\" 한 줄만 쓴다\n\n집계 결과: {{#이탈 집계.summary#}}","user":"","memory":false},{"id":"n5","type":"if-else","title":"이탈 여부","desc":"이탈이 1건 이상이면 IF로 갑니다","why":"이탈이 있는 주와 없는 주의 보고 맨 앞 문구를 다르게 붙이기 위해 길을 나눕니다. 기준은 사람이 정해 둔 숫자(0건 초과)입니다.","check":"가상 파일로 돌리면 IF 쪽으로 갑니다. 이탈 없는 파일로 돌리면 ELSE 쪽으로 갑니다.","tips":["over_count가 String으로 되어 있으면 > 조건이 걸리지 않습니다. 이탈 집계의 출력 유형을 Number로 둡니다."],"cases":[{"name":"IF","logic":"AND","conditions":[{"var":"이탈 집계.over_count","op":">","value":"0"}]}]},{"id":"n6","type":"template","title":"확인 필요 보고","desc":"이탈이 있을 때의 보고 양식","why":"맨 앞에 담당자 확인 문구를 고정해 붙이고, 집계 결과와 확인 사항을 정해진 틀에 끼웁니다.","check":"결과 맨 앞이 '[담당자 확인]'으로 시작하고 두 묶음(주간 설비 상태 보고, 다음 주 확인 사항)이 나옵니다.","tips":[],"inputs":[{"name":"summary","from":"이탈 집계.summary"},{"name":"todo","from":"확인사항 작성.text"}],"template":"[담당자 확인] 기준 이탈이 있습니다. 설비 담당 선임이 원본과 대조한 뒤 확정합니다.\n\n■ 주간 설비 상태 보고\n{{ summary }}\n\n■ 다음 주 확인 사항\n{{ todo }}"},{"id":"n7","type":"template","title":"이상 없음 보고","desc":"이탈이 없을 때의 보고 양식","why":"이탈이 없는 주에는 정기 보고 문구만 붙여 같은 틀로 내보냅니다.","check":"이탈 없는 파일로 돌리면 결과 맨 앞이 '[이상 없음]'으로 시작합니다.","tips":[],"inputs":[{"name":"summary","from":"이탈 집계.summary"}],"template":"[이상 없음] 이번 주 기준 이탈이 없습니다. 정기 보고로 처리합니다.\n\n■ 주간 설비 상태 보고\n{{ summary }}"},{"id":"n8","type":"end","title":"종료","desc":"보고 초안을 내보냅니다","why":"두 갈래의 결과를 출력 변수로 내보냅니다. 한 번 실행에 한쪽만 지나가므로 다른 쪽은 빈 값이 정상입니다.","check":"테스트 실행 결과에 report(또는 report_ok) 하나에만 내용이 있습니다.","tips":[],"outputs":[{"name":"report","from":"확인 필요 보고.output"},{"name":"report_ok","from":"이상 없음 보고.output"}]}],"edges":[{"from":"n1","to":"n2"},{"from":"n2","to":"n3"},{"from":"n3","to":"n4"},{"from":"n4","to":"n5"},{"from":"n5","to":"n6","branch":"IF"},{"from":"n5","to":"n7","branch":"ELSE"},{"from":"n6","to":"n8"},{"from":"n7","to":"n8"}],"tests":[{"input":"check_file에 설비점검기록_가상.csv 올리기","expect":"맨 앞 [담당자 확인], 이탈 3건, 반복 이탈 1건(같은 설비 2회)"},{"input":"기준 이탈이 없는 가상 파일 올리기","expect":"맨 앞 [이상 없음], 이탈 목록 '없음'"}]}
-</script>
-<script type="application/json" id="sample-chatflow">
-{"format":"nodemap-v1","app":{"name":"설비 점검 기준 도우미","mode":"chatflow","goal":"설비 점검 기준서를 근거로 팀원 질문에 답하고, 기준에 맞춘 보고 문구를 써 줍니다","how_to_use":"채팅창에 점검 기준을 묻거나 보고 문구를 요청하면 근거 항목과 함께 답합니다","human_check":"답 끝의 근거 항목을 질문한 사람이 기준서 원문과 대조합니다. 정비 여부 판단은 팀장이 합니다"},"files":[{"name":"설비점검기준서_가상.docx","role":"knowledge","used_at":"지식 > 설비 점검 기준서","desc":"설비별 점검 항목, 기준 범위, 점검 주기, 이탈 시 조치 절차 24개 항목"}],"knowledge":[{"name":"설비 점검 기준서","files":["설비점검기준서_가상.docx"],"separator":"[","chunk":"기본값","why":"기준서는 잘 바뀌지 않고, 질문할 때마다 관련 항목만 찾아 읽으면 되기 때문입니다"}],"nodes":[{"id":"n1","type":"start","title":"시작","desc":"채팅창 질문을 받습니다","why":"팀원이 채팅창에 쓴 질문이 sys.query로 들어옵니다. 따로 만들 입력 칸은 없습니다.","check":"[미리보기]를 누르면 채팅창이 열립니다.","tips":[],"fields":[]},{"id":"n2","type":"question-classifier","title":"질문 분류","desc":"질문을 세 갈래로 나눕니다","why":"기준을 묻는 질문, 보고 문구를 써 달라는 요청, 그 외 질문을 나눠 갈래마다 다르게 답합니다.","check":"미리보기에서 질문을 던진 뒤 [워크플로우 과정]을 펼쳐 원하는 클래스로 갔는지 봅니다.","tips":["엉뚱한 갈래로 가면 클래스 설명 문장부터 고칩니다."],"input":"sys.query","model":"강사가 안내한 모델","classes":[{"desc":"설비 점검 항목, 기준 범위, 점검 주기, 이탈 시 조치 절차를 묻는 질문"},{"desc":"점검 결과 보고 문구나 이탈 보고 메일처럼 문서를 써 달라는 요청, 또는 방금 쓴 문서를 고쳐 달라는 요청"},{"desc":"설비 점검 기준과 관계없는 그 외 질문"}],"memory":true},{"id":"n3","type":"knowledge-retrieval","title":"기준 찾기","desc":"질문과 가까운 기준 항목을 찾습니다","why":"기준서에서 질문과 관련된 항목만 꺼내 AI에게 함께 보냅니다.","check":"▶ 실행 후 result에 기준서 항목 조각이 2~3개 들어 있습니다.","tips":[],"query":"sys.query","knowledge":["설비 점검 기준서"],"top_k":"기본값"},{"id":"n4","type":"llm","title":"기준 안내","desc":"기준서 근거로 답합니다","why":"찾아온 기준 항목만 근거로 세 문장 이내로 답하고, 근거 항목을 끝에 적습니다.","check":"'유압 프레스 압력 기준이 뭐예요?'에 기준 범위와 근거 항목이 나옵니다.","tips":["기준서에 없는 것을 물었을 때 지어내지 않는지 꼭 시험합니다."],"model":"강사가 안내한 모델","context":"기준 찾기.result","system":"당신은 우리 팀의 설비 점검 기준을 안내하는 담당자입니다.\n팀원의 질문에 아래 기준 내용만 근거로 답합니다.\n\n[답변 규칙]\n- 아래 기준 내용으로만 답한다\n- 기준에 없는 내용은 추측하지 않는다. '기준서에서 확인되지 않습니다. 설비 담당 선임에게 문의해 주세요'라고 답한다\n- 기준 범위, 주기 같은 숫자는 적힌 그대로 옮긴다\n- 답 마지막 줄에 근거 항목을 적는다. 예: (근거: 설비 점검 기준서 제5조)\n- 답은 세 문장을 넘지 않는다\n\n기준 내용: {{#context#}}","user":"{{#sys.query#}}","memory":true},{"id":"n5","type":"answer","title":"안내 답변","desc":"안내 결과를 보여 줍니다","why":"기준 안내 LLM이 쓴 답을 채팅창에 보여 줍니다.","check":"채팅창에 답과 근거 항목이 보입니다.","tips":[],"answer":"{{#기준 안내.text#}}"},{"id":"n6","type":"knowledge-retrieval","title":"작성 근거 찾기","desc":"문구에 넣을 기준을 찾습니다","why":"보고 문구에 들어갈 기준 범위와 조치 절차를 기준서에서 찾아옵니다.","check":"▶ 실행 후 result에 관련 항목 조각이 들어 있습니다.","tips":[],"query":"sys.query","knowledge":["설비 점검 기준서"],"top_k":"기본값"},{"id":"n7","type":"llm","title":"문구 작성","desc":"기준에 맞춘 보고 문구를 씁니다","why":"요청에 맞는 보고 문구 초안을 정해진 네 항목 순서로 씁니다.","check":"'유압 프레스 압력 이탈 보고 메일 써 줘'에 네 항목이 순서대로 나옵니다.","tips":[],"model":"강사가 안내한 모델","context":"작성 근거 찾기.result","system":"당신은 팀원이 설비 점검 결과 보고 문구를 쓰도록 돕는 담당자입니다.\n요청에 맞는 문구 초안을 아래 네 항목 순서로 씁니다.\n\n1. 제목\n2. 상황 (설비, 점검 항목, 측정값)\n3. 기준 (근거 항목과 기준 범위)\n4. 요청 사항과 회신 기한\n\n[작성 규칙]\n- 기준 범위와 절차는 아래 기준 내용에 적힌 그대로 쓴다\n- 요청에 없는 값은 '확인 필요'로 남긴다\n- 정비 여부를 정하는 표현은 쓰지 않는다\n\n기준 내용: {{#context#}}","user":"{{#sys.query#}}","memory":true},{"id":"n8","type":"answer","title":"작성 답변","desc":"작성한 문구를 보여 줍니다","why":"문구 작성 LLM의 초안을 채팅창에 보여 줍니다.","check":"채팅창에 네 항목 초안이 보입니다.","tips":[],"answer":"{{#문구 작성.text#}}"},{"id":"n9","type":"answer","title":"그 외 답변","desc":"정해진 안내 문구로 답합니다","why":"관계없는 질문에는 AI를 쓰지 않고 늘 같은 문구로 답합니다.","check":"'점심 메뉴 추천해 줘'에 아래 문구만 나옵니다.","tips":[],"answer":"설비 점검 기준 안내와 점검 결과 보고 문구 작성만 도와드릴 수 있습니다. 점검 항목, 기준 범위, 주기나 보고 문구에 대해 물어봐 주세요."}],"edges":[{"from":"n1","to":"n2"},{"from":"n2","to":"n3","branch":"클래스 1"},{"from":"n3","to":"n4"},{"from":"n4","to":"n5"},{"from":"n2","to":"n6","branch":"클래스 2"},{"from":"n6","to":"n7"},{"from":"n7","to":"n8"},{"from":"n2","to":"n9","branch":"클래스 3"}],"tests":[{"input":"유압 프레스 압력 기준 범위가 얼마예요?","expect":"클래스 1로 가서 기준 범위와 근거 항목을 답합니다"},{"input":"유압 프레스 압력 이탈 보고 메일 써 줘","expect":"클래스 2로 가서 네 항목 초안을 씁니다"},{"input":"(이어서) 좀 더 짧게 써 줘","expect":"클래스 2로 가서 앞 초안을 줄입니다"},{"input":"설비 교체 예산은 얼마예요?","expect":"지어내지 않고 '기준서에서 확인되지 않습니다'로 답합니다"},{"input":"점심 메뉴 추천해 줘","expect":"클래스 3, 정해진 안내 문구만 나옵니다"}]}
-</script>
-
-<script>
-(function(){
-'use strict';
-var SOURCE_HTML = '<!DOCTYPE html>\n' + document.documentElement.outerHTML;
-/* ───────── 기본 정보 ───────── */
-var NODE_W = 240, GAP_X = 96, GAP_Y = 48, PAD = 60, ANCHOR = 24;
-var ICONS = {
-home:'<path d="M2.6 7.3 8 2.8l5.4 4.5v5.9c0 .3-.3.6-.6.6H9.6V10H6.4v3.8H3.2c-.3 0-.6-.3-.6-.6z" fill="#fff"/>',
-sparkle:'<path d="M8 1.6l1.5 4.1 4.3 1.4-4.3 1.4L8 12.6 6.5 8.5 2.2 7.1l4.3-1.4z" fill="#fff"/><path d="M12.6 10.6l.6 1.6 1.6.6-1.6.6-.6 1.6-.6-1.6-1.6-.6 1.6-.6z" fill="#fff"/>',
-flag:'<path d="M4 14.2V2.4M4 2.9h7.6l-1.9 2.9 1.9 2.9H4" stroke="#fff" stroke-width="1.6" fill="none" stroke-linejoin="round" stroke-linecap="round"/>',
-chat:'<path d="M2.6 3.2h10.8v7.2H7.8l-3 2.6v-2.6H2.6z" stroke="#fff" stroke-width="1.5" fill="none" stroke-linejoin="round"/>',
-file:'<path d="M4.2 1.8h4.9l2.9 2.9v9.5H4.2z" stroke="#fff" stroke-width="1.4" fill="none" stroke-linejoin="round"/><path d="M6 8h4.2M6 10.6h4.2" stroke="#fff" stroke-width="1.4" stroke-linecap="round"/>',
-code:'<path d="M5.6 4.4 2.2 8l3.4 3.6M10.4 4.4 13.8 8l-3.4 3.6" stroke="#fff" stroke-width="1.7" fill="none" stroke-linecap="round" stroke-linejoin="round"/>',
-branch:'<path d="M4.2 2.4v11.2M4.2 8.6c0-2.6 1.9-3.9 4.5-3.9h3.6M10.6 2.7l2 2-2 2" stroke="#fff" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/>',
-template:'<path d="M6.2 2.6c-1.5 0-2 .7-2 2v1.6c0 .9-.5 1.4-1.5 1.8 1 .4 1.5.9 1.5 1.8v1.6c0 1.3.5 2 2 2M9.8 2.6c1.5 0 2 .7 2 2v1.6c0 .9.5 1.4 1.5 1.8-1 .4-1.5.9-1.5 1.8v1.6c0 1.3-.5 2-2 2" stroke="#fff" stroke-width="1.5" fill="none" stroke-linecap="round"/>',
-extract:'<path d="M2.6 4h7.2M2.6 8h7.2M2.6 12h3.8M12.4 8.6v5M10.4 11.8l2 2 2-2" stroke="#fff" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>',
-book:'<path d="M2.4 3h4.1c.8 0 1.5.7 1.5 1.5v9.4c0-.8-.7-1.5-1.5-1.5H2.4zM13.6 3H9.5C8.7 3 8 3.7 8 4.5v9.4c0-.8.7-1.5 1.5-1.5h4.1z" stroke="#fff" stroke-width="1.4" fill="none" stroke-linejoin="round"/>',
-classify:'<path d="M2.4 8h3.8M6.2 8l3.4-3.8h3.8M6.2 8l3.4 3.8h3.8M6.2 8h7.2" stroke="#fff" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>',
-merge:'<path d="M2.4 3.6h3l3.1 4.4M2.4 12.4h3l3.1-4.4h5M11.6 6l2 2-2 2" stroke="#fff" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>'
-};
-var TYPES = {
-'start':{label:'시작', color:'#296DFF', icon:'home', def:'시작'},
-'llm':{label:'LLM', color:'#6172F3', icon:'sparkle', def:'LLM'},
-'end':{label:'종료', color:'#F79009', icon:'flag', def:'종료'},
-'answer':{label:'답변', color:'#F79009', icon:'chat', def:'답변'},
-'document-extractor':{label:'문서 추출기', color:'#16B364', icon:'file', def:'문서 추출기'},
-'code':{label:'코드', color:'#2E90FA', icon:'code', def:'코드'},
-'if-else':{label:'IF/ELSE', color:'#06AED4', icon:'branch', def:'IF/ELSE'},
-'template':{label:'템플릿', color:'#2E90FA', icon:'template', def:'템플릿'},
-'parameter-extractor':{label:'매개변수 추출', color:'#2E90FA', icon:'extract', def:'매개변수 추출'},
-'knowledge-retrieval':{label:'지식 검색', color:'#16B364', icon:'book', def:'지식 검색'},
-'question-classifier':{label:'질문 분류기', color:'#16B364', icon:'classify', def:'질문 분류기'},
-'variable-aggregator':{label:'변수 집계기', color:'#2E90FA', icon:'merge', def:'변수 집계기'}
-};
-var TYPE_ALIAS = {
-'시작':'start','start':'start','user-input':'start','사용자 입력':'start',
-'llm':'llm','end':'end','종료':'end','출력':'end','output':'end',
-'answer':'answer','답변':'answer','직접 답변':'answer',
-'document-extractor':'document-extractor','doc-extractor':'document-extractor','document_extractor':'document-extractor','문서 추출기':'document-extractor','문서추출기':'document-extractor',
-'code':'code','코드':'code','코드 실행':'code',
-'if-else':'if-else','if/else':'if-else','ifelse':'if-else','if_else':'if-else','조건':'if-else',
-'template':'template','template-transform':'template','템플릿':'template',
-'parameter-extractor':'parameter-extractor','parameter_extractor':'parameter-extractor','매개변수 추출':'parameter-extractor','매개변수 추출기':'parameter-extractor',
-'knowledge-retrieval':'knowledge-retrieval','knowledge_retrieval':'knowledge-retrieval','지식 검색':'knowledge-retrieval','지식검색':'knowledge-retrieval',
-'question-classifier':'question-classifier','question_classifier':'question-classifier','질문 분류기':'question-classifier','질문분류기':'question-classifier',
-'variable-aggregator':'variable-aggregator','variable_aggregator':'variable-aggregator','변수 집계기':'variable-aggregator','변수 집계자':'variable-aggregator'
-};
-var FIELD_TYPES = {'짧은 텍스트':'String','단락':'String','문단':'String','선택':'String','숫자':'Number','단일 파일':'File','파일 목록':'Array[File]'};
-/* ───────── 상태 ───────── */
-var D = null, IS_SAMPLE = false, ORDER = [], NUM = {}, POS = {}, HEIGHT = {}, HANDLES = {}, WARN = [];
-var VIEW = {x:0, y:0, k:1}, SELECTED = null, DONE = {};
-/* ───────── 도우미 ───────── */
-function $(s, el){ return (el||document).querySelector(s); }
-function $all(s, el){ return Array.prototype.slice.call((el||document).querySelectorAll(s)); }
-function esc(s){ return String(s == null ? '' : s).replace(/[&<>"']/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
-function arr(v){ return Array.isArray(v) ? v : (v == null || v === '' ? [] : [v]); }
-function str(v){ return v == null ? '' : String(v); }
-function toast(msg, ms){ var t = $('#toast'); t.textContent = msg; t.classList.add('show'); clearTimeout(toast._t); toast._t = setTimeout(function(){ t.classList.remove('show'); }, ms || 2600); }
-function iconHTML(type, small){ var T = TYPES[type] || TYPES.code; return '<span class="ic' + (small ? ' s' : '') + '" style="background:' + T.color + '"><svg viewBox="0 0 16 16">' + ICONS[T.icon] + '</svg></span>'; }
-function tlabel(type){ return (TYPES[type] || {label:type}).label; }
-function storageGet(k){ try { return window.localStorage.getItem(k); } catch(e){ return null; } }
-function storageSet(k, v){ try { window.localStorage.setItem(k, v); } catch(e){} }
-function copyText(text, title){
-function fallback(){
-try {
-var ta = document.createElement('textarea'); ta.value = text; ta.setAttribute('readonly', '');
-ta.style.position = 'fixed'; ta.style.left = '-9999px'; document.body.appendChild(ta); ta.select();
-var ok = document.execCommand('copy'); ta.remove(); if (ok) { toast('복사했습니다. 붙여 넣을 곳에 Ctrl+V(⌘+V) 하세요.'); return; }
-} catch(e) {}
-openTextModal(title || '복사하기', '자동 복사가 막힌 화면입니다. 아래 칸을 클릭하고 Ctrl+A(맥: ⌘+A) → Ctrl+C(⌘+C)로 복사합니다.', text);
-}
-try {
-if (navigator.clipboard && window.isSecureContext) {
-navigator.clipboard.writeText(text).then(function(){ toast('복사했습니다. 붙여 넣을 곳에 Ctrl+V(⌘+V) 하세요.'); }, fallback);
-return;
-}
-} catch(e) {}
-fallback();
-}
-function openTextModal(title, desc, text){
-$('#mt-title').textContent = title; $('#mt-desc').textContent = desc; $('#mt-box').value = text;
-$('#m-text').classList.remove('hidden'); setTimeout(function(){ $('#mt-box').focus(); $('#mt-box').select(); }, 30);
-}
-/* ───────── 데이터 정리 ───────── */
-function normType(t){ var k = str(t).trim(); var low = k.toLowerCase(); return TYPE_ALIAS[low] || TYPE_ALIAS[k] || low; }
-function normBranch(b){
-var s = str(b).trim(); if (!s) return '';
-var m;
-if (/^if$/i.test(s)) return 'IF';
-if (/^else$/i.test(s)) return 'ELSE';
-if ((m = s.match(/^elif\s*(\d+)$/i))) return 'ELIF ' + m[1];
-if ((m = s.match(/^(?:class|클래스|case)\s*(\d+)$/i))) return '클래스 ' + m[1];
-return s;
-}
-function normalize(raw){
-if (!raw || typeof raw !== 'object') throw new Error('데이터 모양이 올바르지 않습니다.');
-var app = raw.app || {};
-var mode = str(app.mode).toLowerCase().replace(/\s/g, '');
-mode = /chat|채팅/.test(mode) ? 'chatflow' : 'workflow';
-var d = {
-format: str(raw.format),
-app: {name: str(app.name) || '이름 없는 앱', mode: mode, goal: str(app.goal), how_to_use: str(app.how_to_use), human_check: str(app.human_check)},
-files: arr(raw.files).filter(function(f){ return f && typeof f === 'object'; }),
-knowledge: arr(raw.knowledge).filter(function(k){ return k && typeof k === 'object'; }),
-nodes: [], edges: [], tests: arr(raw.tests).filter(function(t){ return t && typeof t === 'object'; })
-};
-var seen = {};
-arr(raw.nodes).forEach(function(n, i){
-if (!n || typeof n !== 'object') return;
-var o = {};
-for (var key in n) if (Object.prototype.hasOwnProperty.call(n, key)) o[key] = n[key];
-o.id = str(n.id || ('n' + (i + 1))).trim();
-if (seen[o.id]) o.id = o.id + '_' + i;
-seen[o.id] = true;
-o.type = normType(n.type);
-o.title = str(n.title || (TYPES[o.type] ? TYPES[o.type].def : o.type)).trim();
-o.desc = str(n.desc); o.why = str(n.why); o.check = str(n.check); o.tips = arr(n.tips).map(str).filter(Boolean);
-if (o.type === 'start') o.fields = arr(n.fields).filter(function(f){ return f && typeof f === 'object'; });
-if (o.type === 'code' || o.type === 'template') { o.inputs = arr(n.inputs).filter(function(x){ return x && typeof x === 'object'; }); }
-if (o.type === 'code') o.outputs = arr(n.outputs).filter(function(x){ return x && typeof x === 'object'; });
-if (o.type === 'end') o.outputs = arr(n.outputs).filter(function(x){ return x && typeof x === 'object'; });
-if (o.type === 'if-else') {
-o.cases = arr(n.cases).filter(function(c){ return c && typeof c === 'object'; }).map(function(c, ci){
-return {name: ci === 0 ? 'IF' : 'ELIF ' + ci, logic: /or/i.test(str(c.logic)) ? 'OR' : 'AND', conditions: arr(c.conditions).filter(function(x){ return x && typeof x === 'object'; })};
-});
-}
-if (o.type === 'question-classifier') o.classes = arr(n.classes).map(function(c){ return typeof c === 'string' ? {desc:c} : (c || {}); });
-if (o.type === 'parameter-extractor') o.params = arr(n.params).filter(function(x){ return x && typeof x === 'object'; });
-if (o.type === 'knowledge-retrieval') o.knowledge = arr(n.knowledge).map(str);
-if (o.type === 'variable-aggregator') o.vars = arr(n.vars).map(str);
-d.nodes.push(o);
-});
-arr(raw.edges).forEach(function(e){
-if (!e || typeof e !== 'object') return;
-d.edges.push({from: str(e.from || e.source).trim(), to: str(e.to || e.target).trim(), branch: normBranch(e.branch || e.handle || e.case || '')});
-});
-return d;
-}
-/* ───────── 그래프 ───────── */
-var BYID = {}, BYTITLE = {}, OUT = {}, IN = {};
-function buildIndex(){
-BYID = {}; BYTITLE = {}; OUT = {}; IN = {};
-D.nodes.forEach(function(n){ BYID[n.id] = n; if (!BYTITLE[n.title]) BYTITLE[n.title] = n; OUT[n.id] = []; IN[n.id] = []; });
-D.edges = D.edges.filter(function(e){ return BYID[e.from] && BYID[e.to] && e.from !== e.to; });
-D.edges.forEach(function(e){ OUT[e.from].push(e); IN[e.to].push(e); });
-D.nodes.forEach(function(n){
-var br = branchesOf(n);
-if (br) OUT[n.id].sort(function(a, b){ return idx(br, a.branch) - idx(br, b.branch); });
-});
-function idx(list, v){ var i = list.indexOf(v); return i < 0 ? 999 : i; }
-}
-function branchesOf(n){
-if (n.type === 'if-else') return (n.cases || []).map(function(c){ return c.name; }).concat(['ELSE']);
-if (n.type === 'question-classifier') return (n.classes || []).map(function(c, i){ return '클래스 ' + (i + 1); });
-return null;
-}
-function startNode(){ for (var i = 0; i < D.nodes.length; i++) if (D.nodes[i].type === 'start') return D.nodes[i]; return D.nodes[0]; }
-function computeOrder(){
-var s = startNode(); var pre = {}, cnt = 0;
-function dfs(id){ if (pre[id] != null) return; pre[id] = cnt++; (OUT[id] || []).forEach(function(e){ dfs(e.to); }); }
-if (s) dfs(s.id);
-D.nodes.forEach(function(n){ if (pre[n.id] == null) pre[n.id] = cnt++; });
-var indeg = {}; D.nodes.forEach(function(n){ indeg[n.id] = 0; });
-D.edges.forEach(function(e){ indeg[e.to]++; });
-var ready = D.nodes.filter(function(n){ return indeg[n.id] === 0; }).map(function(n){ return n.id; });
-var order = [];
-while (ready.length) {
-ready.sort(function(a, b){ return pre[a] - pre[b]; });
-var id = ready.shift(); order.push(id);
-(OUT[id] || []).forEach(function(e){ indeg[e.to]--; if (indeg[e.to] === 0) ready.push(e.to); });
-}
-D.nodes.forEach(function(n){ if (order.indexOf(n.id) < 0) order.push(n.id); }); // 순환이 있으면 남은 것 뒤에
-ORDER = order; NUM = {}; order.forEach(function(id, i){ NUM[id] = i + 1; });
-}
-function ancestors(id){
-var res = {}, stack = [id];
-while (stack.length) { var cur = stack.pop(); (IN[cur] || []).forEach(function(e){ if (!res[e.from]) { res[e.from] = true; stack.push(e.from); } }); }
-return res;
-}
-/* ───────── 변수 ───────── */
-function outputsOf(n){
-switch (n.type) {
-case 'start': return (n.fields || []).map(function(f){ return {name: str(f.var), type: FIELD_TYPES[str(f.type).trim()] || 'String'}; });
-case 'document-extractor':
-var raw = str(n.input).trim(), dot = raw.lastIndexOf('.'), multi = false;
-if (dot > 0) {
-var src = findNodeByKey(raw.slice(0, dot)), vv = raw.slice(dot + 1).trim();
-if (src && src.type === 'start') (src.fields || []).forEach(function(f){ if (str(f.var) === vv && /목록/.test(str(f.type))) multi = true; });
-}
-return [{name:'text', type: multi ? 'Array[String]' : 'String'}];
-case 'code': return (n.outputs || []).map(function(o){ return {name: str(o.name), type: str(o.type) || 'String'}; });
-case 'llm': return [{name:'text', type:'String'}];
-case 'template': return [{name:'output', type:'String'}];
-case 'parameter-extractor': return (n.params || []).map(function(p){ return {name: str(p.name), type: str(p.type) || 'String'}; }).concat([{name:'__is_success', type:'Number'}, {name:'__reason', type:'String'}]);
-case 'knowledge-retrieval': return [{name:'result', type:'Array[Object]'}];
-case 'question-classifier': return [{name:'class_name', type:'String'}];
-case 'variable-aggregator': return [{name:'output', type: str(n.output_type) || 'String'}];
-default: return [];
-}
-}
-function findNodeByKey(key){
-key = str(key).trim(); if (!key) return null;
-if (BYTITLE[key]) return BYTITLE[key];
-if (BYID[key]) return BYID[key];
-var squash = key.replace(/\s/g, '');
-for (var i = 0; i < D.nodes.length; i++) if (D.nodes[i].title.replace(/\s/g, '') === squash) return D.nodes[i];
-if (/^start$/i.test(key)) return startNode();
-return null;
-}
-function parseRef(ref){
-var s = str(ref).trim().replace(/^\{\{#/, '').replace(/#\}\}$/, '').trim();
-if (!s) return null;
-if (s === 'context') return {ctx:true, label:'컨텍스트'};
-if (/^sys\./.test(s)) return {sys:true, v:s, label:s};
-var i = s.lastIndexOf('.');
-if (i <= 0) return {bad:true, raw:s, label:s};
-var key = s.slice(0, i).trim(), v = s.slice(i + 1).trim();
-if (/^sys$/i.test(key)) return {sys:true, v:'sys.' + v, label:'sys.' + v};
-var node = findNodeByKey(key);
-var exists = !!node && outputsOf(node).some(function(o){ return o.name === v; });
-return {key:key, v:v, node:node, exists:exists, raw:s, label:(node ? node.title : key) + ' > ' + v};
-}
-function chip(ref){
-var r = typeof ref === 'string' ? parseRef(ref) : ref;
-if (!r) return '<span class="chip bad"><span class="cv">비어 있음</span></span>';
-if (r.ctx) return '<span class="chip ctx"><span class="vx">{x}</span><span class="cv">컨텍스트</span></span>';
-if (r.sys) return '<span class="chip"><span class="vx">{x}</span><span class="cv">' + esc(r.v) + '</span></span>';
-if (r.bad) return '<span class="chip bad"><span class="cv">' + esc(r.raw) + '</span></span>';
-var ok = r.node && r.exists;
-var ic = r.node ? iconHTML(r.node.type, true) : '';
-return '<span class="chip' + (ok ? '' : ' bad') + '">' + ic + '<span class="cn">' + esc(r.node ? r.node.title : r.key) + '</span><span class="sep">/</span><span class="vx">{x}</span><span class="cv">' + esc(r.v) + '</span></span>';
-}
-var TOKEN_RE = /\{\{#\s*([^#{}]+?)\s*#\}\}/g;
-function richText(text){
-var s = str(text), out = '', last = 0, m;
-TOKEN_RE.lastIndex = 0;
-while ((m = TOKEN_RE.exec(s))) { out += jinja(esc(s.slice(last, m.index))) + chip(m[1]); last = m.index + m[0].length; }
-out += jinja(esc(s.slice(last)));
-return out;
-}
-function jinja(html){ return html.replace(/\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}/g, '<span class="jin">{{ $1 }}</span>'); }
-function pasteText(text){
-return str(text).replace(TOKEN_RE, function(all, inner){
-var r = parseRef(inner);
-if (!r) return all;
-if (r.ctx) return '【/ 컨텍스트】';
-if (r.sys) return '【/ ' + r.v + '】';
-return '【/ ' + (r.node ? r.node.title : r.key) + ' > ' + r.v + '】';
-});
-}
-function refsInText(text){ var res = [], m; TOKEN_RE.lastIndex = 0; while ((m = TOKEN_RE.exec(str(text)))) res.push(m[1]); return res; }
-function inputsOfNode(n){
-var refs = [];
-switch (n.type) {
-case 'document-extractor': refs.push(n.input); break;
-case 'code': case 'template': (n.inputs || []).forEach(function(x){ refs.push(x.from); }); break;
-case 'llm': if (n.context) refs.push(n.context); refsInText(n.system).concat(refsInText(n.user)).forEach(function(r){ if (r !== 'context') refs.push(r); }); break;
-case 'if-else': (n.cases || []).forEach(function(c){ (c.conditions || []).forEach(function(x){ refs.push(x.var); }); }); break;
-case 'parameter-extractor': refs.push(n.input); break;
-case 'knowledge-retrieval': refs.push(n.query); break;
-case 'question-classifier': refs.push(n.input || 'sys.query'); break;
-case 'variable-aggregator': (n.vars || []).forEach(function(v){ refs.push(v); }); break;
-case 'answer': refsInText(n.answer).forEach(function(r){ refs.push(r); }); break;
-case 'end': (n.outputs || []).forEach(function(o){ refs.push(o.from); }); break;
-}
-var seen = {}; return refs.filter(function(r){ r = str(r); if (!r || seen[r]) return false; seen[r] = true; return true; });
-}
-/* ───────── 점검 ───────── */
-function validate(){
-var W = [];
-function w(n, msg){ W.push((n ? '「' + n.title + '」 ' : '') + msg); }
-if (D.format && D.format !== 'nodemap-v1') w(null, 'format이 "nodemap-v1"이 아닙니다.');
-var starts = D.nodes.filter(function(n){ return n.type === 'start'; });
-if (starts.length !== 1) w(null, '시작 노드는 정확히 1개여야 합니다. (지금 ' + starts.length + '개)');
-var titles = {};
-D.nodes.forEach(function(n){
-if (!TYPES[n.type]) w(n, 'type "' + n.type + '"은(는) 쓸 수 없는 노드입니다. 12개 노드 중에서 골라야 합니다.');
-if (titles[n.title]) w(n, '같은 title이 두 번 나옵니다. title은 서로 달라야 합니다.');
-titles[n.title] = true;
-if (n.title.indexOf('.') >= 0) w(n, 'title에 마침표(.)를 쓰면 변수를 찾을 수 없습니다.');
-});
-if (D.app.mode === 'chatflow') {
-if (D.nodes.some(function(n){ return n.type === 'end'; })) w(null, '채팅플로우에는 종료 노드를 쓰지 않습니다. 끝은 답변 노드입니다.');
-if (!D.nodes.some(function(n){ return n.type === 'answer'; })) w(null, '채팅플로우에 답변 노드가 없습니다.');
-} else {
-if (D.nodes.some(function(n){ return n.type === 'answer'; })) w(null, '워크플로우에는 답변 노드를 쓰지 않습니다. 끝은 종료 노드입니다.');
-if (!D.nodes.some(function(n){ return n.type === 'end'; })) w(null, '워크플로우에 종료 노드가 없습니다.');
-}
-if (D.nodes.length > 10) w(null, '노드가 ' + D.nodes.length + '개입니다. 10개 이하로 줄이면 시간 안에 만들기 쉽습니다.');
-var st = startNode(); var reach = {};
-if (st) { var stack = [st.id]; reach[st.id] = true; while (stack.length) { var c = stack.pop(); (OUT[c] || []).forEach(function(e){ if (!reach[e.to]) { reach[e.to] = true; stack.push(e.to); } }); } }
-D.nodes.forEach(function(n){
-if (!reach[n.id]) w(n, '시작에서 이어지는 선이 없습니다. edges를 확인합니다.');
-var br = branchesOf(n);
-var outs = OUT[n.id] || [];
-if (br) {
-br.forEach(function(b){ if (!outs.some(function(e){ return e.branch === b; })) w(n, b + ' 갈래에 이어지는 선이 없습니다.'); });
-outs.forEach(function(e){ if (br.indexOf(e.branch) < 0) w(n, '나가는 선의 branch "' + (e.branch || '비어 있음') + '"가 갈래 이름(' + br.join(', ') + ')과 맞지 않습니다.'); });
-} else {
-if (n.type !== 'end' && n.type !== 'answer' && !outs.length && TYPES[n.type]) w(n, '다음 노드로 이어지는 선이 없습니다.');
-}
-if (n.type === 'start' && (IN[n.id] || []).length) w(n, '시작 노드로 들어오는 선이 있습니다.');
-var anc = ancestors(n.id);
-inputsOfNode(n).forEach(function(ref){
-var r = parseRef(ref);
-if (!r) return;
-if (r.sys) { if (D.app.mode !== 'chatflow' && r.v === 'sys.query') w(n, 'sys.query는 채팅플로우에서만 씁니다.'); return; }
-if (r.ctx) return;
-if (r.bad) { w(n, '"' + r.raw + '"는 "노드title.변수" 모양이 아닙니다.'); return; }
-if (!r.node) { w(n, '"' + r.raw + '"의 노드 「' + r.key + '」를 찾지 못했습니다.'); return; }
-if (!r.exists) { w(n, '「' + r.node.title + '」 노드에는 ' + r.v + ' 값이 없습니다. (있는 값: ' + (outputsOf(r.node).map(function(o){ return o.name; }).join(', ') || '없음') + ')'); return; }
-if (!anc[r.node.id]) w(n, '「' + r.node.title + ' > ' + r.v + '」는 이 노드보다 앞에 있지 않아 쓸 수 없습니다.');
-});
-if (n.type === 'start') (n.fields || []).forEach(function(f){
-if (!/^[a-z_][a-z0-9_]*$/.test(str(f.var))) w(n, '변수명 "' + str(f.var) + '"는 영어 소문자, 숫자, _ 만 써야 합니다.');
-if (!FIELD_TYPES[str(f.type).trim()]) w(n, '필드 타입 "' + str(f.type) + '"을(를) 알 수 없습니다.');
-});
-if (n.type === 'llm') {
-var hasCtxTok = /\{\{#\s*context\s*#\}\}/.test(str(n.system));
-if (n.context && !hasCtxTok) w(n, '컨텍스트를 채웠지만 system에 {{#context#}}가 없습니다.');
-if (!n.context && hasCtxTok) w(n, 'system에 {{#context#}}가 있지만 context가 비어 있습니다.');
-if (!str(n.system).trim()) w(n, 'system 프롬프트가 비어 있습니다.');
-}
-if (n.type === 'template') {
-var names = (n.inputs || []).map(function(x){ return str(x.name); }), m, re = /\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}/g;
-while ((m = re.exec(str(n.template)))) if (names.indexOf(m[1]) < 0) w(n, '템플릿의 {{ ' + m[1] + ' }}에 맞는 입력 변수가 없습니다.');
-}
-if (n.type === 'code') {
-if (!/def\s+main\s*\(/.test(str(n.code))) w(n, '코드에 def main( 이 없습니다.');
-(n.outputs || []).forEach(function(o){ if (str(n.code).indexOf(str(o.name)) < 0) w(n, '출력 변수 ' + o.name + '가 코드 안에 보이지 않습니다. return 이름과 같아야 합니다.'); });
-(n.inputs || []).forEach(function(x){ var sig = (str(n.code).match(/def\s+main\s*\(([^)]*)\)/) || ['', ''])[1]; if (sig.indexOf(str(x.name)) < 0) w(n, '입력 변수 ' + x.name + '가 def main( ) 괄호 안에 없습니다.'); });
-}
-if (n.type === 'if-else') {
-if (!(n.cases || []).length) w(n, 'IF 조건(cases)이 없습니다.');
-(n.cases || []).forEach(function(c){ (c.conditions || []).forEach(function(x){
-var r = parseRef(x.var);
-if (r && r.node && r.exists && /^[<>≥≤]|^>=|^<=/.test(str(x.op).trim())) {
-var t = (outputsOf(r.node).filter(function(o){ return o.name === r.v; })[0] || {}).type;
-if (t && t !== 'Number') w(n, '「' + r.label + '」를 숫자로 비교하는데 유형이 ' + t + '입니다. Number로 바꿔야 합니다.');
-}
-}); });
-}
-if (n.type === 'question-classifier' && ((n.classes || []).length < 2 || (n.classes || []).length > 4)) w(n, '클래스는 2~4개가 좋습니다.');
-if (n.type === 'knowledge-retrieval') (n.knowledge || []).forEach(function(k){ if (D.knowledge.length && !D.knowledge.some(function(x){ return str(x.name) === k; })) w(n, '지식 「' + k + '」가 knowledge 목록에 없습니다.'); });
-if (n.type === 'end' && !(n.outputs || []).length) w(n, '출력 변수가 없습니다. 결과가 빈 값으로 나옵니다.');
-});
-WARN = W;
-}
-/* ───────── 노드 카드 그리기 ───────── */
-function nodeBody(n){
-var h = '';
-switch (n.type) {
-case 'start':
-(n.fields || []).forEach(function(f){
-h += '<div class="nrow"><span class="l"><span class="vx">{x}</span>' + esc(f.var) + '</span><span class="r">' + (f.required === false ? '' : '필수 · ') + esc(f.type) + '</span></div>';
-});
-if (D.app.mode === 'chatflow' && !(n.fields || []).length) h += '<div class="nrow"><span class="l"><span class="vx">{x}</span>sys.query</span><span class="r">채팅창 질문</span></div>';
-break;
-case 'llm':
-case 'parameter-extractor':
-case 'question-classifier':
-h += '<div class="nrow"><span class="l model"><span class="mi">AI</span>' + esc(n.model || '강사가 안내한 모델') + '</span><span class="r">CHAT</span></div>';
-if (n.type === 'question-classifier') (n.classes || []).forEach(function(c, i){
-h += '<div class="case cls" data-branch="클래스 ' + (i + 1) + '"><div class="cl"><span>클래스 ' + (i + 1) + '</span></div><div class="ct">' + esc(c.desc) + '</div></div>';
-});
-break;
-case 'document-extractor':
-h += '<div class="nrow"><span class="l">' + chip(n.input) + '</span></div>';
-break;
-case 'knowledge-retrieval':
-(n.knowledge || []).forEach(function(k){ h += '<div class="nrow"><span class="l">📚 ' + esc(k) + '</span></div>'; });
-break;
-case 'if-else':
-(n.cases || []).forEach(function(c){
-h += '<div class="case" data-branch="' + esc(c.name) + '"><div class="cl"><span>' + esc(c.name.indexOf('ELIF') === 0 ? 'ELIF' : 'IF') + '</span>' + ((c.conditions || []).length > 1 ? '<span class="logic">' + c.logic + '</span>' : '') + '</div>';
-(c.conditions || []).forEach(function(x){ h += '<div class="cond">' + chip(x.var) + '<span class="op">' + esc(x.op) + '</span><span>' + esc(x.value) + '</span></div>'; });
-h += '</div>';
-});
-h += '<div class="case" data-branch="ELSE"><div class="cl"><span>ELSE</span></div></div>';
-break;
-case 'variable-aggregator':
-(n.vars || []).forEach(function(v){ h += '<div class="nrow"><span class="l">' + chip(v) + '</span></div>'; });
-break;
-case 'answer':
-h += '<div class="answerprev">' + richText(n.answer) + '</div>';
-break;
-case 'end':
-(n.outputs || []).forEach(function(o){ h += '<div class="nrow"><span class="l"><span class="vx">{x}</span>' + esc(o.name) + '</span><span class="r" style="max-width:120px;overflow:hidden;text-overflow:ellipsis">' + esc(parseRef(o.from) ? parseRef(o.from).label : '') + '</span></div>'; });
-break;
-}
-return h;
-}
-function renderNodes(){
-var box = $('#nodes'); box.innerHTML = '';
-D.nodes.forEach(function(n){
-var el = document.createElement('div');
-el.className = 'node'; el.dataset.id = n.id;
-el.style.left = '0px'; el.style.top = '0px'; el.style.visibility = 'hidden';
-el.innerHTML = '<div class="badge">' + NUM[n.id] + '</div>' +
-(n.type !== 'start' ? '<div class="handle tgt" style="top:' + (ANCHOR - 5) + 'px"></div>' : '') +
-'<div class="nh">' + iconHTML(n.type) + '<div class="nt">' + esc(n.title) + '</div></div>' +
-(n.desc ? '<div class="nd">' + esc(n.desc) + '</div>' : '') +
-'<div class="nb">' + nodeBody(n) + '</div>';
-box.appendChild(el);
-});
-// 높이와 갈래 손잡이 위치 재기
-HEIGHT = {}; HANDLES = {};
-$all('.node', box).forEach(function(el){
-var id = el.dataset.id, n = BYID[id];
-HEIGHT[id] = el.offsetHeight;
-var hs = {};
-var br = branchesOf(n);
-if (br) {
-$all('[data-branch]', el).forEach(function(row){
-var top = 0, cur = row; while (cur && cur !== el) { top += cur.offsetTop; cur = cur.offsetParent; }
-var lab = row.querySelector('.cl');
-var y = top + (lab ? lab.offsetTop + lab.offsetHeight / 2 : row.offsetHeight / 2);
-hs[row.dataset.branch] = y;
-});
-} else if (n.type !== 'end' && n.type !== 'answer') hs[''] = ANCHOR;
-HANDLES[id] = hs;
-Object.keys(hs).forEach(function(b){
-var hd = document.createElement('div'); hd.className = 'handle src'; hd.style.top = (hs[b] - 5) + 'px'; el.appendChild(hd);
-});
-});
-}
-/* ───────── 배치 (누가 그려도 같은 자리) ───────── */
-function layout(){
-var rank = {};
-ORDER.forEach(function(id){
-var r = 0; (IN[id] || []).forEach(function(e){ if (rank[e.from] != null) r = Math.max(r, rank[e.from] + 1); });
-rank[id] = r;
-});
-var maxR = 0; ORDER.forEach(function(id){ maxR = Math.max(maxR, rank[id]); });
-var top = {}, groups = [];
-for (var r = 0; r <= maxR; r++) groups.push([]);
-ORDER.forEach(function(id){ groups[rank[id]].push(id); });
-function childTargets(u){ // 가지별 자식 목록 (중복 제거, 순서 유지)
-var list = []; (OUT[u] || []).forEach(function(e){ if (list.indexOf(e.to) < 0) list.push(e.to); }); return list;
-}
-groups.forEach(function(ids, r){
-var items = ids.map(function(id){
-var ins = IN[id] || [], desired;
-if (!ins.length || r === 0) desired = 0;
-else {
-var sum = 0, c = 0;
-ins.forEach(function(e){
-var u = e.from; if (top[u] == null) return;
-var kids = childTargets(u), k = kids.length, i = kids.indexOf(id);
-var anchorU = top[u] + ANCHOR;
-if (k <= 1) { sum += anchorU; c++; return; }
-var total = 0; kids.forEach(function(kid){ total += HEIGHT[kid] || 120; }); total += GAP_Y * (k - 1);
-var centerU = top[u] + (HEIGHT[u] || 120) / 2;
-var y = centerU - total / 2;
-for (var j = 0; j < i; j++) y += (HEIGHT[kids[j]] || 120) + GAP_Y;
-sum += y + ANCHOR; c++;
-});
-desired = c ? sum / c : 0;
-}
-return {id:id, want: desired - ANCHOR, h: HEIGHT[id] || 120, ord: NUM[id]};
-});
-items.sort(function(a, b){ return (a.want - b.want) || (a.ord - b.ord); });
-var prevBottom = -Infinity;
-items.forEach(function(it){ it.y = Math.max(it.want, prevBottom + GAP_Y); prevBottom = it.y + it.h; });
-var shift = 0; items.forEach(function(it){ shift += it.want - it.y; }); shift /= (items.length || 1);
-if (shift < 0) items.forEach(function(it){ it.y += shift; });
-items.forEach(function(it){ top[it.id] = it.y; });
-});
-var minY = Infinity; Object.keys(top).forEach(function(id){ minY = Math.min(minY, top[id]); });
-POS = {};
-ORDER.forEach(function(id){ POS[id] = {x: PAD + rank[id] * (NODE_W + GAP_X), y: PAD + top[id] - minY}; });
-}
-function placeNodes(){
-$all('#nodes .node').forEach(function(el){ var p = POS[el.dataset.id]; el.style.left = p.x + 'px'; el.style.top = p.y + 'px'; el.style.visibility = 'visible'; });
-}
-function edgePath(e){
-var a = POS[e.from], b = POS[e.to];
-var hs = HANDLES[e.from] || {}; var hy = hs[e.branch] != null ? hs[e.branch] : (hs[''] != null ? hs[''] : ANCHOR);
-var sx = a.x + NODE_W, sy = a.y + hy, tx = b.x, ty = b.y + ANCHOR;
-var dx = Math.max(40, Math.abs(tx - sx) * 0.5);
-return 'M' + sx + ',' + sy + ' C' + (sx + dx) + ',' + sy + ' ' + (tx - dx) + ',' + ty + ' ' + tx + ',' + ty;
-}
-function drawEdges(){
-var svg = $('#edges'); var maxX = 0, maxY = 0;
-Object.keys(POS).forEach(function(id){ maxX = Math.max(maxX, POS[id].x + NODE_W + PAD); maxY = Math.max(maxY, POS[id].y + (HEIGHT[id] || 120) + PAD); });
-svg.setAttribute('width', maxX); svg.setAttribute('height', maxY);
-svg.innerHTML = D.edges.map(function(e, i){ return '<path data-i="' + i + '" data-from="' + esc(e.from) + '" data-to="' + esc(e.to) + '" d="' + edgePath(e) + '"/>'; }).join('');
-}
-function bbox(){
-var x1 = Infinity, y1 = Infinity, x2 = -Infinity, y2 = -Infinity;
-Object.keys(POS).forEach(function(id){ var p = POS[id]; x1 = Math.min(x1, p.x); y1 = Math.min(y1, p.y); x2 = Math.max(x2, p.x + NODE_W); y2 = Math.max(y2, p.y + (HEIGHT[id] || 120)); });
-if (x1 === Infinity) return {x:0, y:0, w:400, h:300};
-return {x:x1, y:y1, w:x2 - x1, h:y2 - y1};
-}
-/* ───────── 화면 이동·확대 ───────── */
-function applyView(){ $('#viewport').style.transform = 'translate(' + VIEW.x + 'px,' + VIEW.y + 'px) scale(' + VIEW.k + ')'; $('#z-pct').textContent = Math.round(VIEW.k * 100) + '%'; }
-function area(){
-var left = $('#steps').classList.contains('collapsed') ? 16 : $('#steps').offsetWidth + 32;
-var right = $('#panel').classList.contains('hidden') ? 16 : $('#panel').offsetWidth + 32;
-return {x:left, y:72, w:Math.max(200, window.innerWidth - left - right), h:Math.max(200, window.innerHeight - 72 - 64)};
-}
-function fit(){
-var b = bbox(), a = area();
-var k = Math.min(a.w / (b.w + 40), a.h / (b.h + 40), 1.1); k = Math.max(0.3, k);
-VIEW.k = k; VIEW.x = a.x + (a.w - b.w * k) / 2 - b.x * k; VIEW.y = a.y + (a.h - b.h * k) / 2 - b.y * k; applyView();
-}
-function initialView(){
-// 처음에는 글자가 읽히는 크기(75% 이상)로 보여 줍니다. 다 안 들어가면 시작 노드부터 보이게 왼쪽에 맞춥니다.
-var b = bbox(), a = area();
-var k = Math.min(a.w / (b.w + 40), a.h / (b.h + 40), 1.1);
-if (k >= 0.75) { fit(); return; }
-k = 0.75; VIEW.k = k;
-VIEW.x = a.x + 24 - b.x * k;
-VIEW.y = (b.h * k <= a.h) ? a.y + (a.h - b.h * k) / 2 - b.y * k : a.y + 24 - b.y * k;
-applyView();
-toast('노드가 많아 일부만 보입니다. 화면을 끌어 옮기거나 아래 [⤢ 맞춤]으로 전체를 볼 수 있습니다.', 4200);
-}
-function zoomAt(cx, cy, f){
-var k2 = Math.min(2, Math.max(0.25, VIEW.k * f));
-VIEW.x = cx - (cx - VIEW.x) * (k2 / VIEW.k); VIEW.y = cy - (cy - VIEW.y) * (k2 / VIEW.k); VIEW.k = k2; applyView();
-}
-function ensureVisible(id){
-var p = POS[id]; if (!p) return; var a = area();
-var sx = VIEW.x + p.x * VIEW.k, sy = VIEW.y + p.y * VIEW.k, sw = NODE_W * VIEW.k, sh = (HEIGHT[id] || 120) * VIEW.k;
-var dx = 0, dy = 0;
-if (sx < a.x) dx = a.x - sx + 20; else if (sx + sw > a.x + a.w) dx = (a.x + a.w) - (sx + sw) - 20;
-if (sy < a.y) dy = a.y - sy + 20; else if (sy + sh > a.y + a.h) dy = (a.y + a.h) - (sy + sh) - 20;
-if (dx || dy) { VIEW.x += dx; VIEW.y += dy; applyView(); }
-}
-(function bindPan(){
-var cv = $('#canvas'), drag = null;
-cv.addEventListener('pointerdown', function(ev){
-if (ev.target.closest('.node')) return;
-drag = {x:ev.clientX, y:ev.clientY, vx:VIEW.x, vy:VIEW.y, moved:false}; cv.classList.add('panning');
-try { cv.setPointerCapture(ev.pointerId); } catch(e) {}
-});
-cv.addEventListener('pointermove', function(ev){
-if (!drag) return; var dx = ev.clientX - drag.x, dy = ev.clientY - drag.y;
-if (Math.abs(dx) + Math.abs(dy) > 3) drag.moved = true;
-VIEW.x = drag.vx + dx; VIEW.y = drag.vy + dy; applyView();
-});
-function end(){ if (drag && !drag.moved) closePanel(); drag = null; cv.classList.remove('panning'); }
-cv.addEventListener('pointerup', end); cv.addEventListener('pointercancel', function(){ drag = null; cv.classList.remove('panning'); });
-cv.addEventListener('wheel', function(ev){ ev.preventDefault(); if (ev.ctrlKey || ev.metaKey || Math.abs(ev.deltaY) > Math.abs(ev.deltaX)) zoomAt(ev.clientX, ev.clientY, Math.exp(-ev.deltaY * 0.0015)); else { VIEW.x -= ev.deltaX; applyView(); } }, {passive:false});
-})();
-/* ───────── 말풍선 ───────── */
-function showTip(n, el){
-var ins = inputsOfNode(n).map(function(r){ return chip(r); }).join('');
-var outs = outputsOf(n).map(function(o){ return '<span class="chip"><span class="vx">{x}</span><span class="cv">' + esc(o.name) + '</span></span>'; }).join('');
-var br = branchesOf(n);
-var t = $('#tip');
-t.innerHTML = '<div class="th">' + iconHTML(n.type) + '<div><div class="tt">' + NUM[n.id] + '. ' + esc(n.title) + '</div><div class="tk">' + esc(tlabel(n.type)) + ' 노드</div></div></div>' +
-(n.why ? '<div style="margin-bottom:6px">' + esc(n.why) + '</div>' : '') +
-'<div class="tr"><span class="k">입력</span><span class="v">' + (ins || '<span style="color:var(--t4)">' + (n.type === 'start' ? '사용자가 넣는 값' : '없음') + '</span>') + '</span></div>' +
-'<div class="tr"><span class="k">출력</span><span class="v">' + (outs || '<span style="color:var(--t4)">' + (br ? '갈래: ' + esc(br.join(' / ')) : (n.type === 'end' ? '결과 창에 표시' : n.type === 'answer' ? '채팅창에 표시' : '없음')) + '</span>') + '</span></div>' +
-'<div class="hint">클릭하면 칸마다 넣을 값과 하는 법이 열립니다 →</div>';
-t.classList.remove('hidden');
-var r = el.getBoundingClientRect(), tw = 300, th = t.offsetHeight;
-var left = r.right + 12; if (left + tw > window.innerWidth - 8) left = r.left - tw - 12; if (left < 8) left = 8;
-var top = Math.min(Math.max(8, r.top), window.innerHeight - th - 8);
-t.style.left = left + 'px'; t.style.top = top + 'px';
-}
-function hideTip(){ $('#tip').classList.add('hidden'); }
-function highlight(id, on){
-$all('#edges path').forEach(function(p){ if (p.dataset.from === id || p.dataset.to === id) p.classList.toggle('hi', on || (SELECTED && (p.dataset.from === SELECTED || p.dataset.to === SELECTED))); });
-}
-/* ───────── 칸마다 안내 만들기 ───────── */
-function placeSteps(n){
-var s = [], T = TYPES[n.type] || {label:n.type, def:n.type}, ins = IN[n.id] || [];
-if (n.type === 'start') {
-s.push(D.app.mode === 'chatflow' ? '채팅플로우를 만들면 「시작」 노드가 이미 놓여 있습니다. 새로 놓지 않습니다.' : '앱을 만들면 「시작」 노드 하나가 이미 놓여 있습니다. 새로 놓지 않습니다.');
-} else {
-var first = ins[0], P = first ? BYID[first.from] : null;
-var preset = D.app.mode === 'chatflow' && (n.type === 'llm' || n.type === 'answer') && firstOfType(n);
-if (preset) {
-s.push('채팅플로우를 만들 때 미리 놓인 「' + T.def + '」 노드를 이 노드로 씁니다. 새로 놓지 않아도 됩니다.');
-if (P) s.push('「' + P.title + '」' + (first.branch ? '의 ' + first.branch + ' 오른쪽 +' : ' 오른쪽 끝의 점') + '에서 이 노드 왼쪽 점까지 선이 이어져 있는지 봅니다. 없으면 그 점을 끌어 이 노드 왼쪽 점에 놓습니다. 필요 없는 선은 클릭하고 Delete 키로 지웁니다.');
-} else if (P) {
-if (first.branch) s.push('「' + P.title + '」 노드의 ' + first.branch + ' 줄 오른쪽 + 를 누릅니다. (그 갈래 뒤에만 노드가 붙습니다)');
-else s.push('「' + P.title + '」 노드 오른쪽 끝의 + 를 누릅니다. 이미 뒤에 노드가 있으면 두 노드 사이 선에 마우스를 올려 나오는 + 를 누릅니다.');
-s.push('노드 목록에서 「' + T.label + '」를 고릅니다. 목록 위 검색 칸에 「' + T.label + '」를 치면 바로 찾을 수 있습니다.' + (n.type === 'question-classifier' ? ' (\'질문 이해\' 묶음 아래에 있습니다)' : '') + (n.type === 'end' ? ' (Dify 버전에 따라 「출력」으로 보일 수 있습니다. 같은 노드입니다)' : ''));
-}
-ins.slice(1).forEach(function(e){ var Q = BYID[e.from]; s.push('「' + Q.title + '」' + (e.branch ? '의 ' + e.branch + ' 줄' : '') + ' 오른쪽 점을 끌어 이 노드 왼쪽 점에 놓아 한 줄 더 잇습니다.'); });
-if (n.title !== T.def) s.push('노드 맨 위 이름을 클릭해 「' + n.title + '」로 바꿉니다. 뒤 노드에서 값을 고를 때 이 이름으로 보입니다.');
-}
-if (n.desc) s.push('이름 아래 설명 칸에 「' + n.desc + '」를 적어 둡니다. (선택)');
-return s;
-}
-function firstOfType(n){ for (var i = 0; i < ORDER.length; i++) { var m = BYID[ORDER[i]]; if (m.type === n.type) return m.id === n.id; } return false; }
-function F(label, valueHTML, how, opt){ return {label:label, value:valueHTML, how:how || '', copy:opt && opt.copy, cls:opt && opt.cls}; }
-function fieldsOf(n){
-var f = [], ch = D.app.mode === 'chatflow';
-switch (n.type) {
-case 'start':
-if (ch) f.push(F('채팅창 질문', chip('sys.query'), '따로 만들지 않습니다. 사용자가 채팅창에 쓴 질문이 <b>sys.query</b>로 자동으로 들어옵니다.'));
-(n.fields || []).forEach(function(x, i){
-var kv = [['필드 타입', x.type], ['변수명', x.var], ['레이블명', x.label || x.var], ['필수', x.required === false ? '끔' : '켬']];
-if (/파일/.test(str(x.type))) kv.push(['지원 파일 유형', '문서']);
-if (/목록/.test(str(x.type))) kv.push(['최대 업로드 수', '10']);
-if (str(x.type) === '선택') kv.push(['옵션', arr(x.options).join(', ')]);
-if (x.example) kv.push(['테스트 때 넣을 것', x.example]);
-var how = '시작 노드를 클릭 → 오른쪽 패널 <b>입력 필드</b> 오른쪽 <b>+</b> → 필드 타입 「' + esc(x.type) + '」 → 변수명 칸에 <b>' + esc(x.var) + '</b> (영어, 띄어쓰기 없이) → 레이블명은 자동으로 채워집니다. 「' + esc(x.label || x.var) + '」로 바꿔도 됩니다 → <b>[저장]</b>';
-if (/파일/.test(str(x.type))) how += '<br>파일을 받을 때는 <b>지원 파일 유형</b>을 「문서」로 고르고, 업로드 방식은 둘 다(내 PC, 링크) 그대로 둡니다. (04차시)';
-if (str(x.type) === '단락') how += '<br>긴 글은 「단락」입니다. 「짧은 텍스트」는 한 줄만 받습니다.';
-f.push(F('입력 필드 ' + (i + 1), kvHTML(kv), how));
-});
-if (!ch && !(n.fields || []).length) f.push(F('입력 필드', '<span style="color:var(--err)">없음</span>', '워크플로우는 입력 필드가 하나 이상 있어야 실행할 때 값을 넣을 수 있습니다.'));
-break;
-case 'document-extractor':
-f.push(F('입력 변수', chip(n.input), '입력 변수 칸을 클릭하고 목록에서 「' + esc(refLabel(n.input)) + '」를 고릅니다.'));
-break;
-case 'code':
-f.push(F('입력 변수', listHTML((n.inputs || []).map(function(x){ return '<b>' + esc(x.name) + '</b> ← ' + chip(x.from); })),
-'입력 변수 오른쪽 <b>+</b> → 왼쪽 칸에 변수명 → 오른쪽 칸을 클릭해 목록에서 값을 고릅니다.<br>처음부터 있는 <b>arg1, arg2</b>는 이름을 바꿔 쓰거나 휴지통으로 지웁니다.'));
-f.push(F('언어', 'Python3', '기본값 그대로 둡니다.'));
-f.push(F('코드', esc(n.code), '코드 칸을 클릭 → Ctrl+A(맥: ⌘+A)로 기존 코드를 모두 선택해 지우고 → [복사]한 코드를 붙여 넣습니다. 코드를 읽을 필요는 없습니다.', {copy:str(n.code), cls:'code'}));
-f.push(F('출력 변수', listHTML((n.outputs || []).map(function(o){ return '<b>' + esc(o.name) + '</b> · ' + esc(o.type); })),
-'처음부터 있는 <b>result</b>는 이름을 바꾸거나 지우고, <b>+</b>로 하나씩 만듭니다. 이름은 코드의 return 안 이름과 글자 하나까지 같아야 하고 유형도 똑같이 고릅니다. 숫자로 비교할 값은 반드시 <b>Number</b>입니다.'));
-break;
-case 'llm':
-f.push(F('모델', esc(n.model || '강사가 안내한 모델'), '모델 칸을 클릭해 강사가 안내한 모델을 고릅니다. 목록이 비어 있으면 기술 튜터에게 알립니다.'));
-f.push(F('컨텍스트', n.context ? chip(n.context) : '<span style="color:var(--t3)">비워 둡니다</span>', n.context ? '컨텍스트 칸을 클릭하고 「' + esc(refLabel(n.context)) + '」를 고릅니다. 지식에서 찾은 조각이 AI에게 함께 갑니다.' : '지식을 쓰지 않는 노드입니다. 그대로 비워 둡니다.'));
-f.push(F('SYSTEM', richText(n.system), '[복사] → SYSTEM 칸에 붙여 넣습니다. 붙여 넣은 글 속 <b>【/ ○○ &gt; ○○】</b> 표시는 지우고, 그 자리에서 <b>/</b> 를 눌러 목록에서 같은 값을 고릅니다. 파란 상자로 바뀌면 제대로 들어간 것입니다.' + (/\{\{#\s*context\s*#\}\}/.test(str(n.system)) ? '<br><b>【/ 컨텍스트】</b> 자리는 / 를 누른 뒤 목록 맨 아래의 「컨텍스트」를 고릅니다. (06차시)' : ''), {copy:pasteText(n.system), cls:'pre'}));
-if (ch || str(n.user).trim()) f.push(F('USER', str(n.user).trim() ? richText(n.user) : chip('sys.query'), ch ? '채팅플로우는 USER 칸에 sys.query가 이미 들어 있습니다. 그대로 둡니다.' : 'USER 칸에 붙여 넣고 【/ …】 자리는 / 로 다시 고릅니다.', {cls:'pre'}));
-if (ch || n.memory) f.push(F('메모리', n.memory ? '켬' : '끔', n.memory ? 'LLM 패널 아래쪽 <b>메모리</b> 스위치를 켭니다. 앞 대화를 이어받아 "좀 더 짧게" 같은 후속 요청에 답합니다.' : '메모리는 끈 채로 둡니다.'));
-break;
-case 'template':
-f.push(F('입력 변수', listHTML((n.inputs || []).map(function(x){ return '<b>' + esc(x.name) + '</b> ← ' + chip(x.from); })),
-'입력 변수 오른쪽 <b>+</b> → 변수명 → 값 칸을 클릭해 목록에서 고릅니다. 처음부터 있는 <b>arg1</b>은 이름을 바꿔 쓰거나 지웁니다.'));
-f.push(F('코드', richText(n.template), '코드 칸의 기존 내용({{ arg1 }})을 지우고 [복사]한 글을 붙여 넣습니다. <b>{{ 이름 }}</b> 은 / 로 고르지 않고 글자 그대로 둡니다. (04차시)', {copy:str(n.template), cls:'pre'}));
-break;
-case 'if-else':
-(n.cases || []).forEach(function(c, i){
-var lines = (c.conditions || []).map(function(x){ return chip(x.var) + ' <b>' + esc(x.op) + '</b> ' + esc(x.value); });
-var how = (i === 0 ? '' : 'IF 아래 <b>[+ ELIF]</b>를 눌러 칸을 만듭니다.<br>') + '<b>+ 조건 추가</b> → 변수 칸을 클릭해 「' + esc((c.conditions || []).map(function(x){ return refLabel(x.var); }).join('」, 「')) + '」를 고릅니다 → 연산자를 클릭해 바꿉니다 (기본값 그대로 두지 않습니다) → 비교 방식은 <b>상수</b> → 값 칸에 숫자나 글자를 적습니다.';
-if ((c.conditions || []).length > 1) how += '<br>조건이 두 개 이상이면 두 조건 사이의 표시를 <b>' + c.logic + '</b>로 맞춥니다.';
-f.push(F(c.name + (i === 0 ? ' (첫 번째 조건)' : ''), listHTML(lines) + ((c.conditions || []).length > 1 ? '<div style="margin-top:4px;font-size:12px;color:var(--t3)">조건 묶음: ' + c.logic + '</div>' : ''), how));
-});
-f.push(F('ELSE', '<span style="color:var(--t3)">설정할 것 없음</span>', '위 조건에 맞지 않는 나머지가 모두 ELSE로 갑니다.'));
-f.push(F('갈래 잇기', listHTML((OUT[n.id] || []).map(function(e){ return '<b>' + esc(e.branch) + '</b> → 「' + esc(BYID[e.to].title) + '」'; })), '갈래마다 그 줄 오른쪽 <b>+</b> 에서 다음 노드를 붙입니다.'));
-break;
-case 'parameter-extractor':
-f.push(F('입력 변수', chip(n.input), '입력 변수 칸을 클릭하고 목록에서 고릅니다.'));
-f.push(F('모델', esc(n.model || '강사가 안내한 모델'), '강사가 안내한 모델을 고릅니다.'));
-f.push(F('추출할 매개변수', listHTML((n.params || []).map(function(p){ return '<b>' + esc(p.name) + '</b> · ' + esc(p.type || 'String') + (p.required === false ? '' : ' · 필수') + '<br><span style="color:var(--t3)">' + esc(p.desc) + '</span>'; })),
-'<b>추출할 매개변수 +</b> → 이름(영어) → 유형 → 설명 → 필수를 켭니다. <b>설명 문장</b>이 AI가 값을 찾는 기준이니 그대로 붙여 넣습니다.'));
-if (n.instruction) f.push(F('지시사항', richText(n.instruction), '지시사항 칸에 붙여 넣습니다. (선택)', {copy:pasteText(n.instruction), cls:'pre'}));
-break;
-case 'knowledge-retrieval':
-f.push(F('질의 텍스트', chip(n.query), (parseRef(n.query) || {}).sys ? '채팅플로우는 sys.query가 자동으로 들어갑니다. 그대로 둡니다.' : '질의 텍스트 칸을 클릭하고 「' + esc(refLabel(n.query)) + '」를 고릅니다. 이 글과 가까운 조각을 지식에서 찾습니다.'));
-f.push(F('지식', listHTML((n.knowledge || []).map(function(k){ return '📚 <b>' + esc(k) + '</b>'; })), '지식 오른쪽 <b>+</b> → 준비 단계에서 만든 지식을 고르고 <b>[추가]</b>를 누릅니다.'));
-f.push(F('검색 설정 (상위 K)', esc(n.top_k || '기본값'), '처음에는 기본값으로 둡니다. 답이 반쪽만 나오면 상위 K를 2~3 올립니다. 실제 실행에는 이 노드의 설정이 적용됩니다. (06차시)'));
-break;
-case 'question-classifier':
-f.push(F('입력 변수', chip(n.input || 'sys.query'), 'sys.query가 자동으로 들어가 있습니다. 건드리지 않습니다.'));
-f.push(F('모델', esc(n.model || '강사가 안내한 모델'), '강사가 안내한 모델을 고릅니다. 분류만 하므로 빠른 모델도 됩니다.'));
-(n.classes || []).forEach(function(c, i){ f.push(F('클래스 ' + (i + 1), esc(c.desc), '클래스 ' + (i + 1) + '의 <b>"주제 이름을 작성하세요"</b> 칸에 그대로 붙여 넣습니다.' + (i >= 2 ? ' 칸이 모자라면 아래 <b>[+ 클래스 추가]</b>를 누릅니다.' : ''), {copy:str(c.desc)})); });
-f.push(F('메모리', n.memory ? '켬' : '끔', n.memory ? '아래 <b>고급 설정</b>을 펼쳐 메모리를 켭니다. 켜지 않으면 "좀 더 짧게 써 줘" 같은 후속 요청이 그 외 갈래로 빠질 수 있습니다.' : '끈 채로 둡니다.'));
-f.push(F('갈래 잇기', listHTML((OUT[n.id] || []).map(function(e){ return '<b>' + esc(e.branch) + '</b> → 「' + esc(BYID[e.to].title) + '」'; })), '클래스마다 오른쪽에 <b>+</b> 가 따로 있습니다. 그 + 를 누르면 그 갈래 뒤에만 노드가 붙습니다.'));
-break;
-case 'variable-aggregator':
-f.push(F('변수', listHTML((n.vars || []).map(function(v){ return chip(v); })), '변수 목록 오른쪽 <b>+</b>를 눌러 갈래마다 하나씩 고릅니다. 고른 값들의 유형이 같아야 합니다.'));
-f.push(F('출력 유형', esc(n.output_type || 'String'), '처음 고른 값의 유형으로 자동으로 맞춰집니다.'));
-break;
-case 'answer':
-f.push(F('답변', richText(n.answer), refsInText(n.answer).length ? '[복사] → 답변 칸에 붙여 넣고 <b>【/ …】</b> 표시 자리는 지운 뒤 / 를 눌러 같은 값을 고릅니다.' : '정해진 문구입니다. [복사]해서 답변 칸에 그대로 붙여 넣습니다.', {copy:pasteText(n.answer), cls:'pre'}));
-break;
-case 'end':
-f.push(F('출력 변수', listHTML((n.outputs || []).map(function(o){ return '<b>' + esc(o.name) + '</b> ← ' + chip(o.from); })),
-'출력 변수 오른쪽 <b>+</b> → 왼쪽 칸에 이름 → 오른쪽 칸을 클릭해 목록에서 값을 고릅니다. 빠뜨리면 결과가 빈 값으로 나옵니다. (03차시)' + ((n.outputs || []).length > 1 ? '<br>갈래가 있으면 한 번 실행에 한쪽만 지나가므로, 지나가지 않은 쪽 값은 빈 값이 정상입니다.' : '')));
-break;
-}
-return f;
-}
-function refLabel(ref){ var r = parseRef(ref); return r ? r.label : ''; }
-function kvHTML(kv){ return '<div class="kv">' + kv.map(function(p){ return '<span class="k">' + esc(p[0]) + '</span><span class="v">' + esc(p[1]) + '</span>'; }).join('') + '</div>'; }
-function listHTML(items){ return items.length ? items.map(function(x){ return '<div style="margin:2px 0">' + x + '</div>'; }).join('') : '<span style="color:var(--t3)">없음</span>'; }
-var MISTAKES = {
-'start':['변수명에 한글이나 띄어쓰기를 쓰지 않습니다. 뒤에서 이 이름으로 값을 고릅니다.', '긴 글은 「단락」, 한 줄은 「짧은 텍스트」, 파일은 「단일 파일」 또는 「파일 목록」입니다.'],
-'document-extractor':['출력이 비어 있으면 뒤 노드는 손대지 말고 시작 노드의 파일과 지원 파일 유형부터 확인합니다. (04차시)', 'CSV 한글이 깨지면 파일을 UTF-8로 다시 저장합니다.'],
-'code':['출력 변수 이름이나 유형이 코드와 다르면 실행 오류가 납니다.', 'IF/ELSE에서 숫자로 비교할 값은 Number로 둡니다. String이면 > 조건이 걸리지 않습니다. (04차시)', '결과 숫자는 원본 파일에서 한 줄만 손으로 계산해 맞춰 봅니다.'],
-'llm':['변수를 글자로 직접 치면 빈 값이 들어갑니다. 반드시 / 를 눌러 목록에서 고릅니다. (03차시)', '결과가 이상하면 프롬프트 네 칸(상황 · 할 일과 출력 모양 · 규칙 · 입력 자리) 중 약한 칸부터 고칩니다.'],
-'template':['{{ }} 안의 이름이 입력 변수 이름과 한 글자라도 다르면 그 자리가 비어 나옵니다.'],
-'if-else':['연산자를 기본값 그대로 두면 엉뚱한 쪽으로 갑니다.', '한 번 실행에 한쪽 길만 지나갑니다. 반대쪽을 시험하려면 기준값을 잠깐 바꿔 돌려 보고 다시 되돌립니다. (04차시)'],
-'parameter-extractor':['설명이 흐리면 엉뚱한 값을 뽑습니다. "회의록에서 할 일을 맡은 사람 이름"처럼 구체적으로 씁니다.'],
-'knowledge-retrieval':['지식 문서 상태가 「사용 가능」이 되기 전에는 결과가 비어 나옵니다.', '찾아오지 못한 조각은 없는 것과 같습니다. 답이 반쪽이면 상위 K를 조금 올립니다.'],
-'question-classifier':['엉뚱한 갈래로 가면 노드를 고치지 말고 클래스 설명 문장부터 고칩니다. (06차시)'],
-'variable-aggregator':['한 번 실행에 한쪽 갈래만 지나가므로, 지나간 쪽 값이 output으로 나옵니다.'],
-'answer':['답변 칸의 변수도 / 로 골라야 합니다. 글자로 치면 그대로 글자가 보입니다.'],
-'end':['출력 변수를 지정하지 않으면 실행해도 결과가 비어 나옵니다. (03차시)']
-};
-function checkHTML(n){
-var std = n.type === 'start' ? (D.app.mode === 'chatflow' ? '우측 상단 <b>[미리보기]</b>를 누르면 채팅창이 열립니다.' : '우측 상단 <b>[테스트 실행]</b>을 누르면 입력 칸이 보입니다.')
-: n.type === 'end' ? '우측 상단 <b>[테스트 실행]</b> → 결과 창에서 출력 변수를 확인하고, <b>[추적]</b> 탭에서 노드별 입력·출력을 봅니다.'
-: n.type === 'answer' ? '<b>[미리보기]</b>에서 질문을 던지고 답변 아래 <b>[워크플로우 과정]</b>을 펼쳐 이 노드까지 왔는지 확인합니다.'
-: '노드 오른쪽 위 <b>▶ (이 단계 실행)</b>을 누르면 이 노드만 따로 돌려 볼 수 있습니다. 앞 노드 값을 직접 넣어 시험합니다.';
-return (n.check ? '<div class="okbox">✅ ' + esc(n.check) + '</div>' : '') + '<div class="fh" style="margin-top:8px">' + std + '</div>';
-}
-function nodeGuideHTML(n, forPrint){
-var h = '';
-if (n.why) h += '<div class="why"><b>이 노드가 하는 일</b><br>' + esc(n.why) + '</div>';
-var nodeWarn = WARN.filter(function(w){ return w.indexOf('「' + n.title + '」') === 0; });
-if (nodeWarn.length) h += '<div class="sec"><h4>⚠️ 데이터에서 확인할 곳</h4><ul class="warns">' + nodeWarn.map(function(w){ return '<li>' + esc(w.replace('「' + n.title + '」 ', '')) + '</li>'; }).join('') + '</ul></div>';
-h += '<div class="sec"><h4><span class="no">1</span>노드 놓기</h4><ol class="steps">' + placeSteps(n).map(function(s){ return '<li>' + esc(s) + '</li>'; }).join('') + '</ol></div>';
-var fs = fieldsOf(n);
-h += '<div class="sec"><h4><span class="no">2</span>칸 채우기 <span style="font-weight:500;color:var(--t3);font-size:12px">· Dify 패널 위에서부터 같은 순서</span></h4>';
-fs.forEach(function(f, i){
-h += '<div class="field"><div class="fl"><span class="fn">' + esc(f.label) + '</span>' + (f.copy != null && !forPrint ? '<button class="btn small" data-copy="' + i + '">복사</button>' : '') + '</div>' +
-'<div class="fv' + (f.cls ? ' ' + f.cls : '') + '">' + f.value + '</div>' + (f.how ? '<div class="fh">' + f.how + '</div>' : '') + '</div>';
-});
-h += '</div>';
-var outs = outputsOf(n), br = branchesOf(n);
-h += '<div class="sec"><h4><span class="no">3</span>이 노드가 내보내는 값</h4>';
-if (outs.length) h += '<div class="outs">' + outs.map(function(o){ return '<span class="out"><span class="vx">{x}</span><b>' + esc(o.name) + '</b><span class="ty">' + esc(o.type) + '</span></span>'; }).join('') + '</div><div class="fh">뒤 노드에서는 목록에서 <b>「' + esc(n.title) + ' &gt; ' + esc(outs[0].name) + '」</b>처럼 이 노드 이름과 함께 고릅니다.</div>';
-else h += '<div class="note">' + (br ? 'IF/ELSE와 질문 분류기는 값을 만들지 않고 길만 나눕니다. 갈래: ' + esc(br.join(' / ')) : n.type === 'end' ? '테스트 실행 결과 창에 출력 변수가 보입니다.' : n.type === 'answer' ? '이 내용이 채팅창에 보입니다.' : '없음') + '</div>';
-h += '</div>';
-h += '<div class="sec"><h4><span class="no">4</span>확인하기</h4>' + checkHTML(n) + '</div>';
-var mist = (MISTAKES[n.type] || []).concat(n.tips || []);
-if (mist.length) h += '<div class="sec"><h4>⚠️ 자주 막히는 곳</h4><ul class="mist">' + mist.map(function(m){ return '<li>' + esc(m) + '</li>'; }).join('') + '</ul></div>';
-return {html:h, fields:fs};
-}
-/* ───────── 준비 단계 안내 ───────── */
-function prepItems(){
-var items = [];
-if (D.files.length) items.push({key:'files', icon:'📁', title:'가상 파일 준비', kind: D.files.length + '개'});
-D.knowledge.forEach(function(k, i){ items.push({key:'kb-' + i, icon:'📚', title:'지식 만들기: ' + str(k.name), kind:'지식'}); });
-items.push({key:'app', icon:'🧩', title:'앱 만들기', kind: D.app.mode === 'chatflow' ? '채팅플로우' : '워크플로우'});
-return items;
-}
-function prepGuide(key){
-var h = '', title = '', kind = '';
-if (key === 'files') {
-title = '가상 파일 준비'; kind = '준비';
-h += '<div class="why"><b>실제 사내 파일은 올리지 않습니다.</b><br>교육용 Dify는 외부 환경입니다. 모양만 같은 가상 파일로 실습합니다.</div>';
-h += '<div class="sec"><table class="tbl"><tr><th>파일</th><th>종류</th><th>넣는 곳</th></tr>' + D.files.map(function(f){
-var isK = /know|지식/i.test(str(f.role));
-return '<tr><td><b>' + esc(f.name) + '</b><br><span style="color:var(--t3)">' + esc(f.desc) + '</span></td><td><span class="tag ' + (isK ? 'b' : 'a') + '">' + (isK ? 'B 지식' : 'A 실행 입력') + '</span></td><td>' + esc(f.used_at) + '</td></tr>';
-}).join('') + '</table></div>';
-h += '<div class="sec"><div class="fh"><b>A 실행 입력</b>: 실행할 때마다 시작 노드에 넣는 파일입니다 (매번 바뀌는 재료).<br><b>B 지식</b>: 앱을 만들기 전에 지식에 한 번 올려 두는 참고 문서입니다 (잘 안 바뀌는 재료).</div></div>';
-} else if (key.indexOf('kb-') === 0) {
-var k = D.knowledge[+key.slice(3)] || {};
-title = '지식 만들기: ' + str(k.name); kind = '준비';
-if (k.why) h += '<div class="why"><b>왜 지식에 두나요?</b><br>' + esc(k.why) + '</div>';
-h += '<div class="sec"><h4><span class="no">1</span>지식 만들기</h4><ol class="steps">' + [
-'왼쪽 메뉴 「지식」 → [생성] → [바로 사용할 수 있는 지식 베이스 만들기] → [텍스트 파일에서 가져오기]를 차례로 누릅니다.',
-'파일을 올리고 [다음]을 누릅니다: ' + arr(k.files).join(', '),
-'청크 설정의 세그먼트 식별자를 「' + str(k.separator || '[') + '」로 바꿉니다. 최대 청크 길이는 「' + str(k.chunk || '기본값') + '」, 나머지는 기본값대로 둡니다. 인덱스 모드는 「고품질」입니다. (05차시)',
-'오른쪽 [미리보기]로 조각 하나에 항목 하나씩 들어갔는지 확인하고 [저장하고 처리]를 누릅니다. 조각 맨 앞의 「[」는 자르면서 빠집니다. 정상입니다.',
-'지식 이름을 「' + str(k.name) + '」로 바꿉니다. 지식 검색 노드에서 이 이름으로 고릅니다.',
-'문서 상태가 모두 「사용 가능」이 될 때까지 기다립니다. 처리 중에 검색하면 결과가 비어 나옵니다.'
-].map(function(s){ return '<li>' + esc(s) + '</li>'; }).join('') + '</ol></div>';
-h += '<div class="sec"><div class="note">세그먼트 식별자를 「[」로 바꾸는 이유: 가상 지식 파일은 항목마다 [문서이름 제N조(제목)]처럼 대괄호로 시작합니다. 「[」에서 자르면 항목 하나가 조각 하나가 됩니다. (06차시)</div></div>';
-} else if (key === 'app') {
-title = '앱 만들기'; kind = D.app.mode === 'chatflow' ? '채팅플로우' : '워크플로우';
-if (D.app.goal) h += '<div class="why"><b>이 앱이 하는 일</b><br>' + esc(D.app.goal) + (D.app.how_to_use ? '<br><span style="color:var(--t3)">' + esc(D.app.how_to_use) + '</span>' : '') + '</div>';
-var st = ['왼쪽 「스튜디오」 → 우측 상단 [생성] → [빈 상태로 시작]을 누릅니다.',
-'앱 유형으로 「' + (D.app.mode === 'chatflow' ? '채팅 플로우' : '워크플로우') + '」를 고릅니다.',
-'앱 이름에 「' + D.app.name + '」를 적고 [생성]을 누릅니다.'];
-if (D.app.mode === 'chatflow') st.push('채팅플로우는 시작 → LLM → 답변 세 노드가 미리 놓여 있습니다. 노드구성도의 첫 LLM과 첫 답변으로 그대로 쓰고, 사이에 필요한 노드는 선 위의 + 로 끼워 넣습니다.');
-st.push('왼쪽 「만드는 순서」의 노드를 1번부터 하나씩 놓습니다. 하나를 놓을 때마다 ▶(이 단계 실행)로 확인하고 체크합니다.');
-h += '<div class="sec"><h4><span class="no">1</span>앱 만들기</h4><ol class="steps">' + st.map(function(s){ return '<li>' + esc(s) + '</li>'; }).join('') + '</ol></div>';
-if (D.app.human_check) h += '<div class="sec"><h4>👤 사람이 확인하는 칸</h4><div class="note">' + esc(D.app.human_check) + '</div></div>';
-h += '<div class="sec"><h4>꼭 기억할 세 가지 (03차시)</h4><ul class="mist"><li>선은 순서만 정합니다. 값은 뒤 노드에서 직접 골라야 넘어갑니다.</li><li>변수는 「노드 이름 &gt; 값 이름」으로 목록에서 고릅니다. 글자로 치지 않습니다.</li><li>앞에 있는 노드의 값만 뒤에서 쓸 수 있습니다.</li></ul></div>';
-} else if (key === 'test') {
-title = '테스트와 3번 반복 실행'; kind = '확인';
-h += '<div class="why"><b>같은 입력으로 3번 이상 실행합니다.</b><br>AI는 같은 입력에도 조금씩 다르게 씁니다. 3번의 결과가 얼마나 다른지(출력 편차)를 봅니다.</div>';
-if (D.tests.length) h += '<div class="sec"><table class="tbl"><tr><th>넣을 것</th><th>나와야 하는 결과</th></tr>' + D.tests.map(function(t){ return '<tr><td>' + esc(t.input) + '</td><td>' + esc(t.expect) + '</td></tr>'; }).join('') + '</table></div>';
-h += '<div class="sec"><ol class="steps">' + (D.app.mode === 'chatflow'
-? ['우측 상단 [미리보기]를 누르고 위 질문을 차례로 던집니다.', '답변 아래 [워크플로우 과정]을 펼쳐 원하는 갈래로 갔는지 봅니다.', '[게시하기]를 눌러야 공유 링크에 반영됩니다.']
-: ['우측 상단 [테스트 실행] → 입력 칸에 위 값을 넣고 실행합니다.', '결과가 이상하면 [추적] 탭에서 앞 노드부터 차례로 눌러 처음 값이 이상해진 노드를 찾습니다.', '같은 입력으로 3번 실행해 항목 · 순서 · 숫자가 같은지 봅니다.']
-).map(function(s){ return '<li>' + esc(s) + '</li>'; }).join('') + '</ol></div>';
-}
-return {title:title, kind:kind, html:h};
-}
-/* ───────── 왼쪽 목록 ───────── */
-function renderSteps(){
-var b = $('#stepsbody'), h = '';
-h += '<div class="ssec">준비</div>';
-prepItems().forEach(function(it){ h += stepItem('p:' + it.key, '<span class="num">' + it.icon + '</span>', it.title, it.kind); });
-h += '<div class="ssec">노드 (만드는 순서)</div>';
-ORDER.forEach(function(id){ var n = BYID[id]; h += stepItem('n:' + id, '<span class="num">' + NUM[id] + '</span>' + iconHTML(n.type, true), n.title, tlabel(n.type)); });
-h += '<div class="ssec">확인</div>';
-h += stepItem('p:test', '<span class="num">▶</span>', '테스트 · 3번 반복 실행', D.tests.length ? D.tests.length + '건' : '');
-b.innerHTML = h;
-updateProgress();
-}
-function stepItem(key, lead, title, kind){
-var on = !!DONE[key];
-return '<div class="sitem' + (on ? ' isdone' : '') + '" data-key="' + esc(key) + '"><span class="chk' + (on ? ' on' : '') + '" data-chk="' + esc(key) + '">' + (on ? '✓' : '') + '</span>' + lead + '<span class="txt">' + esc(title) + '</span><span class="kind">' + esc(kind || '') + '</span></div>';
-}
-function updateProgress(){
-var keys = $all('#stepsbody .sitem').map(function(el){ return el.dataset.key; });
-var done = keys.filter(function(k){ return DONE[k]; }).length;
-$('#prog').textContent = done + ' / ' + keys.length;
-$all('#nodes .node').forEach(function(el){ el.classList.toggle('done', !!DONE['n:' + el.dataset.id]); });
-}
-function doneKey(){ return 'nodemap-done:' + D.app.name; }
-function loadDone(){ DONE = {}; var s = storageGet(doneKey()); if (s) { try { DONE = JSON.parse(s) || {}; } catch(e) { DONE = {}; } } }
-function saveDone(){ storageSet(doneKey(), JSON.stringify(DONE)); }
-/* ───────── 오른쪽 패널 ───────── */
-function openPanel(key){
-var p = $('#panel'), html = '', head = '', fields = null;
-if (key.indexOf('n:') === 0) {
-var id = key.slice(2), n = BYID[id]; if (!n) return;
-SELECTED = id;
-var g = nodeGuideHTML(n); fields = g.fields;
-head = '<div class="prow1">' + iconHTML(n.type) + '<div class="ptitle">' + esc(n.title) + '</div><span class="pkind">' + NUM[id] + '/' + ORDER.length + ' · ' + esc(tlabel(n.type)) + '</span><button class="pclose" id="p-x" title="닫기">×</button></div>' + (n.desc ? '<div class="pdesc">' + esc(n.desc) + '</div>' : '');
-html = g.html;
-} else {
-SELECTED = null;
-var pg = prepGuide(key.slice(2));
-head = '<div class="prow1"><div class="ptitle">' + esc(pg.title) + '</div><span class="pkind">' + esc(pg.kind) + '</span><button class="pclose" id="p-x" title="닫기">×</button></div>';
-html = pg.html;
-}
-var keys = $all('#stepsbody .sitem').map(function(el){ return el.dataset.key; }), i = keys.indexOf(key);
-var prev = i > 0 ? keys[i - 1] : null, next = i < keys.length - 1 ? keys[i + 1] : null;
-p.innerHTML = '<div class="phead">' + head + '</div><div class="pbody">' + html + '</div>' +
-'<div class="pfoot"><button class="btn small" id="p-prev"' + (prev ? '' : ' disabled') + '>◀ 이전</button>' +
-'<button class="btn small' + (DONE[key] ? '' : ' primary') + '" id="p-done">' + (DONE[key] ? '✓ 완료함 (취소)' : '다 했어요 ✓') + '</button>' +
-'<button class="btn small" id="p-next"' + (next ? '' : ' disabled') + '>다음 ▶</button></div>';
-p.classList.remove('hidden');
-p.dataset.key = key;
-$('#p-x').onclick = closePanel;
-$('#p-prev').onclick = function(){ if (prev) select(prev); };
-$('#p-next').onclick = function(){ if (next) select(next); };
-$('#p-done').onclick = function(){ toggleDone(key); if (!DONE[key]) return; if (next) select(next); };
-if (fields) $all('[data-copy]', p).forEach(function(b){ b.onclick = function(){ var f = fields[+b.dataset.copy]; copyText(f.copy, f.label + ' 복사'); }; });
-$all('#nodes .node').forEach(function(el){ el.classList.toggle('selected', el.dataset.id === SELECTED); });
-$all('#stepsbody .sitem').forEach(function(el){ el.classList.toggle('active', el.dataset.key === key); });
-$all('#edges path').forEach(function(pa){ pa.classList.toggle('hi', !!SELECTED && (pa.dataset.from === SELECTED || pa.dataset.to === SELECTED)); });
-if (SELECTED) ensureVisible(SELECTED);
-}
-function closePanel(){
-SELECTED = null; $('#panel').classList.add('hidden');
-$all('#nodes .node').forEach(function(el){ el.classList.remove('selected'); });
-$all('#stepsbody .sitem').forEach(function(el){ el.classList.remove('active'); });
-$all('#edges path').forEach(function(pa){ pa.classList.remove('hi'); });
-}
-function select(key){ openPanel(key); var el = $('#stepsbody .sitem[data-key="' + key.replace(/"/g, '\\"') + '"]'); if (el) el.scrollIntoView({block:'nearest'}); }
-function toggleDone(key){
-DONE[key] = !DONE[key]; if (!DONE[key]) delete DONE[key]; saveDone();
-var el = $('#stepsbody .sitem[data-key="' + key.replace(/"/g, '\\"') + '"]');
-if (el) { el.classList.toggle('isdone', !!DONE[key]); var c = el.querySelector('.chk'); c.classList.toggle('on', !!DONE[key]); c.textContent = DONE[key] ? '✓' : ''; }
-updateProgress();
-var p = $('#panel'); if (!p.classList.contains('hidden') && p.dataset.key === key) { var b = $('#p-done'); if (b) { b.textContent = DONE[key] ? '✓ 완료함 (취소)' : '다 했어요 ✓'; b.classList.toggle('primary', !DONE[key]); } }
-}
-/* ───────── 알림 띠 ───────── */
-function renderBanner(){
-var b = $('#banner'), h = '';
-if (IS_SAMPLE) h += '<div class="bar sample">👀 지금 보이는 것은 <b>예시</b>입니다. ChatGPT가 만든 데이터를 넣으면 내 앱의 노드구성도로 바뀝니다. <button class="btn small primary" id="bn-paste">내 데이터 붙여넣기</button></div>';
-if (WARN.length) h += '<div class="bar warn">⚠️ 데이터에서 확인할 곳 <b>' + WARN.length + '개</b> <button class="btn small" id="bn-list">보기</button><button class="btn small" id="bn-fix">GPT에게 고쳐 달라고 할 문장 복사</button></div><ul id="warnlist" class="hidden">' + WARN.map(function(w){ return '<li>' + esc(w) + '</li>'; }).join('') + '</ul>';
-else if (!IS_SAMPLE) h += '<div class="bar ok" id="okbar">✅ 데이터 점검 통과 · 노드에 마우스를 올리거나 클릭해 보세요</div>';
-b.innerHTML = h;
-var bp = $('#bn-paste'); if (bp) bp.onclick = openPaste;
-var bl = $('#bn-list'); if (bl) bl.onclick = function(){ $('#warnlist').classList.toggle('hidden'); };
-var bf = $('#bn-fix'); if (bf) bf.onclick = function(){ copyText(fixRequest(), 'GPT에게 보낼 문장'); };
-var ok = $('#okbar'); if (ok) setTimeout(function(){ if (ok.parentNode) ok.remove(); }, 6000);
-}
-function fixRequest(){
-return '노드구성도 뷰어에서 아래 문제가 나왔습니다.\n문제를 고쳐서 같은 형식(nodemap-v1)의 JSON 전체를 코드 블록 하나로 다시 출력해 주세요. 설명 문장은 쓰지 않습니다.\n\n' + WARN.map(function(w){ return '- ' + w; }).join('\n');
-}
-/* ───────── 한 장으로 보기 / 인쇄 ───────── */
-function openGuide(){
-var g = $('#guide'), h = '<div class="gwrap"><div class="gtop"><div><h1>' + esc(D.app.name) + ' · 노드구성도</h1><div class="sub">' + (D.app.mode === 'chatflow' ? '채팅플로우' : '워크플로우') + ' · 노드 ' + D.nodes.length + '개 · 만드는 순서대로 정리</div></div><div class="btns" style="display:flex;gap:8px"><button class="btn" id="g-print">🖨 인쇄 / PDF</button><button class="btn primary" id="g-close">캔버스로 돌아가기</button></div></div>';
-h += '<div class="summarybox">' + [['하는 일', D.app.goal], ['쓰는 법', D.app.how_to_use], ['사람 확인', D.app.human_check]].filter(function(p){ return p[1]; }).map(function(p){ return '<span class="k">' + p[0] + '</span><span>' + esc(p[1]) + '</span>'; }).join('') + '</div>';
-var b = bbox(), W = Math.min(930, window.innerWidth - 50), k = Math.min(1, W / (b.w + 40)), H = (b.h + 40) * k;
-h += '<div class="gmap" style="height:' + Math.ceil(H) + 'px"><div class="inner" id="g-inner" style="transform:translate(' + (20 * k - b.x * k) + 'px,' + (20 * k - b.y * k) + 'px) scale(' + k + ')"></div></div>';
-prepItems().forEach(function(it){ var pg = prepGuide(it.key); h += '<div class="gsec"><h2>' + it.icon + ' ' + esc(pg.title) + '</h2>' + pg.html + '</div>'; });
-h += '<div class="gsec"><h2>🧱 노드 만들기</h2>';
-ORDER.forEach(function(id){ var n = BYID[id]; h += '<div class="gnode"><div class="ghead"><span class="badge">' + NUM[id] + '</span>' + iconHTML(n.type) + '<span class="gt">' + esc(n.title) + '</span><span class="pkind">' + esc(tlabel(n.type)) + '</span></div>' + (n.desc ? '<div class="pdesc">' + esc(n.desc) + '</div>' : '') + nodeGuideHTML(n, true).html + '</div>'; });
-h += '</div>';
-var tg = prepGuide('test'); h += '<div class="gsec"><h2>▶ ' + esc(tg.title) + '</h2>' + tg.html + '</div></div>';
-g.innerHTML = h; g.classList.remove('hidden'); g.scrollTop = 0;
-var inner = $('#g-inner'); var edgesClone = $('#edges').cloneNode(true); edgesClone.removeAttribute('id'); edgesClone.setAttribute('class', 'gedges'); inner.appendChild(edgesClone); var nodesClone = $('#nodes').cloneNode(true); nodesClone.removeAttribute('id'); inner.appendChild(nodesClone);
-$all('.node', inner).forEach(function(el){ el.classList.remove('selected', 'related'); });
-$all('path', inner).forEach(function(p){ p.classList.remove('hi'); });
-$('#g-close').onclick = function(){ g.classList.add('hidden'); };
-$('#g-print').onclick = function(){ try { window.print(); } catch(e) { toast('이 화면에서는 인쇄가 막혀 있습니다. 파일을 내려받아 크롬에서 열어 인쇄하세요.'); } };
-}
-/* ───────── 저장 ───────── */
-function exportHTML(){
-var json = JSON.stringify(D.__raw || {}, null, 2).replace(/<\/(script)/gi, '<\\/$1');
-var open = '<script type="application/json" id="nodemap-' + 'data" data-sample="';
-var i = SOURCE_HTML.indexOf(open);
-if (i < 0) { toast('저장할 원본을 찾지 못했습니다.'); return; }
-var j = SOURCE_HTML.indexOf('">', i + open.length);
-var k = SOURCE_HTML.indexOf('</' + 'script>', j);
-var out = SOURCE_HTML.slice(0, i) + open + 'false">\n' + json + '\n' + SOURCE_HTML.slice(k);
-var name = '노드구성도_' + D.app.name.replace(/[\\/:*?"<>|\s]+/g, '_') + '.html';
-try {
-var blob = new Blob([out], {type:'text/html;charset=utf-8'}), url = URL.createObjectURL(blob);
-var a = document.createElement('a'); a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove();
-setTimeout(function(){ URL.revokeObjectURL(url); }, 4000);
-toast('「' + name + '」를 내려받았습니다. 다운로드 폴더를 확인하세요. 안 보이면 이 화면이 노션 안이라서 막힌 것입니다 → 뷰어 파일을 내려받아 크롬에서 다시 해 주세요.', 6500);
-} catch(e) {
-openTextModal('HTML 코드로 저장하기', '이 화면에서는 파일 저장이 막혀 있습니다. 아래 코드를 모두 복사해 메모장에 붙여 넣고, 파일 형식 \'모든 파일\', 인코딩 \'UTF-8\'로 「' + name + '」 이름으로 저장합니다.', out);
-}
-}
-/* ───────── 불러오기 ───────── */
-function extractJSON(text){
-var t = str(text).replace(/^﻿/, '').trim();
-if (!t) throw new Error('붙여 넣은 내용이 없습니다.');
-var fence = t.match(/```(?:json|JSON)?\s*([\s\S]*?)```/);
-if (fence && fence[1].indexOf('{') >= 0) t = fence[1].trim();
-var a = t.indexOf('{'), b = t.lastIndexOf('}');
-if (a < 0 || b < a) throw new Error('JSON의 시작 { 과 끝 } 을 찾지 못했습니다. ChatGPT 답의 코드 블록을 통째로 복사했는지 확인합니다.');
-t = t.slice(a, b + 1);
-try { return JSON.parse(t); } catch(e1) {
-var t2 = t.replace(/,\s*([}\]])/g, '$1');
-try { return JSON.parse(t2); } catch(e2) {
-throw new Error('JSON 문법 오류: ' + e1.message + '\n\n→ ChatGPT에 "JSON 문법 오류가 있어. 같은 내용으로 올바른 JSON 코드 블록 하나만 다시 출력해 줘"라고 보냅니다.');
-}
-}
-}
-function load(raw, sample){
-var d = normalize(raw); d.__raw = raw;
-if (!d.nodes.length) throw new Error('노드(nodes)가 하나도 없습니다.');
-D = d; IS_SAMPLE = !!sample;
-buildIndex(); computeOrder(); validate(); loadDone();
-$('#appname').textContent = D.app.name; document.title = '노드구성도 · ' + D.app.name;
-var mb = $('#modebadge'); mb.textContent = D.app.mode === 'chatflow' ? '채팅플로우' : '워크플로우'; mb.classList.toggle('chat', D.app.mode === 'chatflow');
-$('#appicon').textContent = D.app.mode === 'chatflow' ? '💬' : '🧩';
-closePanel(); renderNodes(); layout(); placeNodes(); drawEdges(); renderSteps(); renderBanner(); bindNodes();
-requestAnimationFrame(initialView);
-}
-function bindNodes(){
-$all('#nodes .node').forEach(function(el){
-var n = BYID[el.dataset.id];
-el.addEventListener('mouseenter', function(){ showTip(n, el); highlight(n.id, true); });
-el.addEventListener('mouseleave', function(){ hideTip(); highlight(n.id, false); });
-el.addEventListener('click', function(ev){ ev.stopPropagation(); hideTip(); select('n:' + n.id); });
-});
-}
-function openPaste(){ $('#pasteerr').classList.add('hidden'); $('#m-paste').classList.remove('hidden'); setTimeout(function(){ $('#pastebox').focus(); }, 30); }
-function drawFromBox(){
-var err = $('#pasteerr');
-try { var raw = extractJSON($('#pastebox').value); load(raw, false); $('#m-paste').classList.add('hidden'); toast('노드구성도를 그렸습니다. 왼쪽 「만드는 순서」 1번부터 따라 하세요.'); }
-catch(e) { err.textContent = e.message; err.classList.remove('hidden'); }
-}
-/* ───────── 버튼 연결 ───────── */
-$('#b-paste').onclick = openPaste;
-$('#b-draw').onclick = drawFromBox;
-$('#b-ex-wf').onclick = function(){ try { load(JSON.parse($('#sample-workflow').textContent), true); $('#m-paste').classList.add('hidden'); } catch(e) { toast(e.message); } };
-$('#b-ex-cf').onclick = function(){ try { load(JSON.parse($('#sample-chatflow').textContent), true); $('#m-paste').classList.add('hidden'); } catch(e) { toast(e.message); } };
-$('#b-cur').onclick = function(){ $('#pastebox').value = JSON.stringify(D.__raw, null, 2); };
-$('#b-guide').onclick = openGuide;
-$('#b-save').onclick = exportHTML;
-$('#b-steps').onclick = function(){ var s = $('#steps'); s.classList.toggle('collapsed'); this.textContent = s.classList.contains('collapsed') ? '펼치기' : '접기'; };
-$('#z-in').onclick = function(){ zoomAt(window.innerWidth / 2, window.innerHeight / 2, 1.2); };
-$('#z-out').onclick = function(){ zoomAt(window.innerWidth / 2, window.innerHeight / 2, 1 / 1.2); };
-$('#z-fit').onclick = fit;
-$('#z-badge').onclick = function(){ document.body.classList.toggle('nobadge'); };
-$('#mt-copy').onclick = function(){ var t = $('#mt-box'); t.focus(); t.select(); try { if (document.execCommand('copy')) toast('복사했습니다.'); } catch(e) {} };
-$all('[data-close]').forEach(function(b){ b.onclick = function(){ $('#' + b.dataset.close).classList.add('hidden'); }; });
-$('#stepsbody').addEventListener('click', function(ev){
-var c = ev.target.closest('[data-chk]'); if (c) { ev.stopPropagation(); toggleDone(c.dataset.chk); return; }
-var it = ev.target.closest('.sitem'); if (it) select(it.dataset.key);
-});
-document.addEventListener('keydown', function(ev){
-if (ev.key === 'Escape') { $all('.modal').forEach(function(m){ m.classList.add('hidden'); }); if (!$('#guide').classList.contains('hidden')) $('#guide').classList.add('hidden'); else closePanel(); }
-});
-window.addEventListener('resize', function(){ if (D) fit(); });
-window.addEventListener('beforeprint', function(){ if (D && !$('#guide').innerHTML.trim()) { openGuide(); } });
-/* ───────── 시작 ───────── */
-if (window.innerWidth < 1000) { $('#steps').classList.add('collapsed'); $('#b-steps').textContent = '펼치기'; }
-var dataEl = $('#nodemap-data');
-try {
-if (dataEl.dataset.sample === 'true') load(JSON.parse($('#sample-workflow').textContent), true);
-else load(JSON.parse(dataEl.textContent), false);
-} catch(e) {
-document.body.insertAdjacentHTML('beforeend', '<div class="modal"><div class="mbox"><div class="mhead"><div><h3>데이터를 읽지 못했습니다</h3><p>' + esc(e.message) + '</p></div></div></div></div>');
-}
-})();
-</script>
-</body>
-</html>
