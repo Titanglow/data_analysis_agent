@@ -31,12 +31,14 @@ def get_installed_ollama_models() -> list[str]:
 
 
 def _get_active_groq_models(api_key: str) -> list[str]:
-    """Groq 서버에서 현재 계정이 사용 가능한 최신 활성 텍스트 모델 목록을 조회합니다."""
+    """
+    Groq 서버에서 현재 계정이 사용 가능한 최신 활성 텍스트 모델 목록을 조회합니다.
+    (약관 동의가 필요한 모델이나 오디오/비전 모델은 제외하고 안정적인 텍스트 모델만 반환)
+    """
     preferred = [
         "llama-3.3-70b-versatile",
         "llama-3.1-8b-instant",
         "qwen-2.5-32b",
-        "mixtral-8x7b-32768",
     ]
     try:
         req = urllib.request.Request(
@@ -48,7 +50,7 @@ def _get_active_groq_models(api_key: str) -> list[str]:
             avail = [
                 m["id"]
                 for m in data.get("data", [])
-                if "id" in m and not any(w in m["id"].lower() for w in ["whisper", "tts", "guard", "vision", "audio"])
+                if "id" in m and not any(w in m["id"].lower() for w in ["whisper", "tts", "guard", "vision", "audio", "canopylabs", "tool-use"])
             ]
             ordered = [m for m in preferred if m in avail]
             for m in avail:
@@ -60,14 +62,10 @@ def _get_active_groq_models(api_key: str) -> list[str]:
 
 
 def call_llm(prompt: str, mode: str = "local_ollama") -> tuple[str, float]:
-    """
-    선택된 모드(cloud_groq, cloud_gemini, local_ollama, mock)로 LLM을 호출하고
-    (응답 텍스트, 소요 시간 초)를 반환합니다.
-    """
+    """선택된 모드로 LLM을 호출하고 (응답 텍스트, 소요 시간 초)를 반환합니다."""
     load_dotenv(dotenv_path=ENV_PATH, override=True)
     t0 = time.perf_counter()
 
-    # 1. 테스트 모드 (Mock)
     if mode == "mock":
         time.sleep(0.15)
         sample = (
@@ -83,7 +81,6 @@ def call_llm(prompt: str, mode: str = "local_ollama") -> tuple[str, float]:
         )
         return sample, round(time.perf_counter() - t0, 2)
 
-    # 2. Cloud: Groq (충분한 출력 토큰 2200 부여로 중간 잘림 방지)
     if mode == "cloud_groq":
         api_key = os.getenv("GROQ_API_KEY", "").strip()
         if not api_key:
@@ -93,19 +90,22 @@ def call_llm(prompt: str, mode: str = "local_ollama") -> tuple[str, float]:
             client = OpenAI(api_key=api_key, base_url="https://api.groq.com/openai/v1")
             candidates = _get_active_groq_models(api_key)
             last_err = None
-            for m_name in candidates[:4]:
+            # 무료 티어 토큰 제한(TPM) 에러 방지를 위해 프롬프트 길이를 물리적으로 제한 (약 6000자 이내)
+            safe_prompt = prompt if len(prompt) < 15000 else prompt[:15000] + "\n...[데이터 길이 초과로 요약됨]"
+
+            for m_name in candidates[:3]:
                 try:
                     resp = client.chat.completions.create(
                         model=m_name,
                         messages=[
                             {
                                 "role": "system",
-                                "content": "당신은 사내 데이터 분석 수석 전문가입니다. 요청된 1~4번 목차만 명확하고 완결된 문장으로 작성하고, 원본 샘플 행 데이터를 절대 그대로 나열하지 마십시오.",
+                                "content": "당신은 사내 데이터 분석 수석 전문가입니다. 원본 샘플 행 데이터를 통째로 나열하지 말고, 요청된 질문에 대해 간결하고 명확하게 답변하십시오.",
                             },
-                            {"role": "user", "content": prompt},
+                            {"role": "user", "content": safe_prompt},
                         ],
                         temperature=0.2,
-                        max_tokens=2200,
+                        max_tokens=1500,
                     )
                     txt = resp.choices[0].message.content or ""
                     if txt.strip():
@@ -113,12 +113,14 @@ def call_llm(prompt: str, mode: str = "local_ollama") -> tuple[str, float]:
                         return header + txt.strip(), round(time.perf_counter() - t0, 2)
                 except Exception as e:
                     last_err = e
+                    # 413 에러(TPM 초과) 발생 시, 다음 모델로 넘어가지 않고 즉시 에러 반환 (계속 시도해봤자 동일함)
+                    if "413" in str(e):
+                        return f"⚠️ Groq 토큰 한도 초과 에러: 입력된 데이터가 너무 많습니다. 조회 조건을 더 좁혀서 검색해 주세요.\n({last_err})", round(time.perf_counter() - t0, 2)
                     continue
             return f"⚠️ Groq API 호출 오류: {last_err}", round(time.perf_counter() - t0, 2)
         except Exception as e:
             return f"⚠️ Groq 초기화 오류: {e}", round(time.perf_counter() - t0, 2)
 
-    # 3. Cloud: Gemini
     if mode == "cloud_gemini":
         api_key = os.getenv("GOOGLE_API_KEY", "").strip() or os.getenv("GEMINI_API_KEY", "").strip()
         if not api_key:
@@ -156,7 +158,6 @@ def call_llm(prompt: str, mode: str = "local_ollama") -> tuple[str, float]:
         except Exception as e:
             return f"⚠️ Gemini 초기화 오류: {e}", round(time.perf_counter() - t0, 2)
 
-    # 4. Local: Ollama (num_predict=2200, num_ctx=4096으로 끊김 방지)
     base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
     local_model = os.getenv("LOCAL_MODEL_NAME", "qwen2.5-coder:7b")
     try:
