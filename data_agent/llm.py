@@ -33,7 +33,7 @@ def get_installed_ollama_models() -> list[str]:
 def _get_active_groq_models(api_key: str) -> list[str]:
     """
     Groq 서버에서 현재 계정이 사용 가능한 최신 활성 텍스트 모델 목록을 조회합니다.
-    (약관 동의가 필요한 모델이나 오디오/비전 모델은 제외하고 안정적인 텍스트 모델만 반환)
+    (약관 동의 모델이나 토큰 한도가 적은 모델을 원천 차단하고 가장 안정적인 모델만 반환)
     """
     preferred = [
         "llama-3.3-70b-versatile",
@@ -49,7 +49,7 @@ def _get_active_groq_models(api_key: str) -> list[str]:
             avail = [
                 m["id"]
                 for m in data.get("data", [])
-                if "id" in m and not any(w in m["id"].lower() for w in ["whisper", "tts", "guard", "vision", "audio", "canopylabs", "tool-use"])
+                if "id" in m and not any(w in m["id"].lower() for w in ["whisper", "tts", "guard", "vision", "audio", "canopylabs", "tool-use", "llama-guard"])
             ]
             ordered = [m for m in preferred if m in avail]
             for m in avail:
@@ -90,8 +90,8 @@ def call_llm(prompt: str, mode: str = "local_ollama") -> tuple[str, float]:
             candidates = _get_active_groq_models(api_key)
             last_err = None
 
-            # [다이어트 추가 안전장치] 만약 파이썬에서 줄이는 걸 깜빡했더라도 여기서 물리적으로 잘라버림
-            safe_prompt = prompt if len(prompt) < 10000 else prompt[:10000] + "\n...[데이터 길이 초과로 요약됨]"
+            # [최종 다이어트 방어선] 프롬프트 문자열 길이를 물리적으로 10,000자(약 3~4천 토큰) 이내로 강제 절단
+            safe_prompt = prompt if len(prompt) < 10000 else prompt[:10000] + "\n\n...[이하 데이터 초과로 생략됨. 앞선 통계표 위주로 답변할 것.]"
 
             for m_name in candidates[:3]:
                 try:
@@ -105,7 +105,7 @@ def call_llm(prompt: str, mode: str = "local_ollama") -> tuple[str, float]:
                             {"role": "user", "content": safe_prompt},
                         ],
                         temperature=0.2,
-                        max_tokens=900,  # 출력 토큰 제한 하향
+                        max_tokens=900,  # OTPM 에러 방지를 위해 900 토큰으로 제한
                     )
                     txt = resp.choices[0].message.content or ""
                     if txt.strip():
@@ -113,9 +113,9 @@ def call_llm(prompt: str, mode: str = "local_ollama") -> tuple[str, float]:
                         return header + txt.strip(), round(time.perf_counter() - t0, 2)
                 except Exception as e:
                     last_err = e
-                    # 413, 429 에러(토큰 초과) 발생 시 즉시 중단 및 안내 메시지 반환
+                    # 413, 429 에러(토큰 초과) 발생 시 즉시 중단 및 안내 반환
                     if any(err_code in str(e) for err_code in ["413", "429"]):
-                        return f"⚠️ Groq 토큰 한도 초과 에러: 입력 데이터가 너무 많습니다. 조회 조건을 더 좁혀서(예: '상위 5건') 검색해 주세요.\n({last_err})", round(time.perf_counter() - t0, 2)
+                        return f"⚠️ Groq 무료 API 토큰 한도 초과: 데이터 크기가 너무 큽니다. 검색 조건을 좁혀서(예: '상위 5건만') 다시 시도해 주세요.\n({last_err})", round(time.perf_counter() - t0, 2)
                     continue
             return f"⚠️ Groq API 호출 오류: {last_err}", round(time.perf_counter() - t0, 2)
         except Exception as e:
