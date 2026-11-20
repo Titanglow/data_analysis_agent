@@ -33,14 +33,31 @@ def get_installed_ollama_models() -> list[str]:
 def _get_active_groq_models(api_key: str) -> list[str]:
     """
     Groq 서버에서 현재 계정이 사용 가능한 최신 활성 텍스트 모델 목록을 조회합니다.
-    (무료 티어 토큰 한도가 가장 넉넉하고 안정적인 모델 1순위로 강제 고정)
+    (약관 동의가 필요한 모델이나 오디오/비전 모델은 제외하고 안정적인 텍스트 모델만 반환)
     """
-    # 413/429/400 에러를 막기 위해, 무료 티어 허용량이 가장 큰 검증된 모델만 명시적으로 사용합니다.
-    # canopylabs 등 약관 동의가 필요하거나 ITPM/OTPM이 너무 작은 모델은 원천 차단합니다.
-    return [
+    preferred = [
         "llama-3.3-70b-versatile",
         "llama-3.1-8b-instant",
     ]
+    try:
+        req = urllib.request.Request(
+            "https://api.groq.com/openai/v1/models",
+            headers={"Authorization": f"Bearer {api_key}", "User-Agent": "Mozilla/5.0"},
+        )
+        with urllib.request.urlopen(req, timeout=3.0) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            avail = [
+                m["id"]
+                for m in data.get("data", [])
+                if "id" in m and not any(w in m["id"].lower() for w in ["whisper", "tts", "guard", "vision", "audio", "canopylabs", "tool-use"])
+            ]
+            ordered = [m for m in preferred if m in avail]
+            for m in avail:
+                if m not in ordered:
+                    ordered.append(m)
+            return ordered if ordered else preferred
+    except Exception:
+        return preferred
 
 
 def call_llm(prompt: str, mode: str = "local_ollama") -> tuple[str, float]:
@@ -73,11 +90,10 @@ def call_llm(prompt: str, mode: str = "local_ollama") -> tuple[str, float]:
             candidates = _get_active_groq_models(api_key)
             last_err = None
 
-            # [핵심 다이어트] 무료 티어 ITPM(7000~8000) 에러 방지를 위해 프롬프트 길이를 물리적으로 강력 제한 (약 5000자 이내)
-            # 592건 전체 데이터가 들어오면 무조건 뒷부분을 잘라내어 토큰 초과를 막습니다.
-            safe_prompt = prompt if len(prompt) < 5000 else prompt[:5000] + "\n...[API 토큰 한도 초과 방지를 위해 하위 데이터 생략됨. 위 통계표를 바탕으로 답변하세요.]"
+            # [다이어트 추가 안전장치] 만약 파이썬에서 줄이는 걸 깜빡했더라도 여기서 물리적으로 잘라버림
+            safe_prompt = prompt if len(prompt) < 10000 else prompt[:10000] + "\n...[데이터 길이 초과로 요약됨]"
 
-            for m_name in candidates:
+            for m_name in candidates[:3]:
                 try:
                     resp = client.chat.completions.create(
                         model=m_name,
@@ -89,8 +105,7 @@ def call_llm(prompt: str, mode: str = "local_ollama") -> tuple[str, float]:
                             {"role": "user", "content": safe_prompt},
                         ],
                         temperature=0.2,
-                        # [핵심 다이어트] OTPM(1000) 429 에러 방지를 위해 max_tokens를 900으로 하향 조정
-                        max_tokens=900,
+                        max_tokens=900,  # 출력 토큰 제한 하향
                     )
                     txt = resp.choices[0].message.content or ""
                     if txt.strip():
@@ -98,12 +113,11 @@ def call_llm(prompt: str, mode: str = "local_ollama") -> tuple[str, float]:
                         return header + txt.strip(), round(time.perf_counter() - t0, 2)
                 except Exception as e:
                     last_err = e
-                    # 413, 429 에러 발생 시, 바로 다음 후보 모델(llama)로 넘어가서 재시도
+                    # 413, 429 에러(토큰 초과) 발생 시 즉시 중단 및 안내 메시지 반환
                     if any(err_code in str(e) for err_code in ["413", "429"]):
-                        continue
-
-            # 모든 후보 모델이 실패했을 경우
-            return f"⚠️ Groq 토큰 한도(무료 티어) 초과 에러: 입력된 데이터가 너무 많습니다. 조회 조건(1번 창)을 좁혀서(예: '상위 10건') 검색해 주세요.\n({last_err})", round(time.perf_counter() - t0, 2)
+                        return f"⚠️ Groq 토큰 한도 초과 에러: 입력 데이터가 너무 많습니다. 조회 조건을 더 좁혀서(예: '상위 5건') 검색해 주세요.\n({last_err})", round(time.perf_counter() - t0, 2)
+                    continue
+            return f"⚠️ Groq API 호출 오류: {last_err}", round(time.perf_counter() - t0, 2)
         except Exception as e:
             return f"⚠️ Groq 초기화 오류: {e}", round(time.perf_counter() - t0, 2)
 

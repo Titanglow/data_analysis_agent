@@ -131,7 +131,12 @@ st.markdown(
 )
 
 
-def _build_compact_sample_str(df: pd.DataFrame, max_rows: int = 100) -> str:
+def _build_compact_sample_str(df: pd.DataFrame, max_rows: int = 10) -> str:
+    """
+    [데이터 다이어트]
+    전체 데이터를 모두 LLM으로 보내면 토큰 초과 에러가 발생하므로,
+    최대 10개의 핵심 샘플 행만 간결하게 잘라서 전송합니다.
+    """
     if df is None or len(df) == 0:
         return "데이터 없음"
     sub = df.head(max_rows).copy()
@@ -171,11 +176,11 @@ def get_file_type_badge(filename: str) -> tuple[str, str]:
 
 
 def build_pipeline_status_html(
-    has_file: bool,
-    has_query_df: bool,
-    saved_results: dict,
-    running_stage: int = 0,
-    running_msg: str = "",
+        has_file: bool,
+        has_query_df: bool,
+        saved_results: dict,
+        running_stage: int = 0,
+        running_msg: str = "",
 ) -> str:
     has_analysis = bool(saved_results) and running_stage == 0
     has_verified_report = has_analysis and any(bool(v.get("report")) for v in saved_results.values())
@@ -443,10 +448,10 @@ def build_smart_sql(nl_query: str, df: pd.DataFrame, table_name: str) -> str:
 
 
 def generate_smart_assistant_question(
-    target_df: pd.DataFrame,
-    raw_df: pd.DataFrame,
-    user_filter_text: str,
-    threshold: float = DEFAULT_DEFECT_THRESHOLD,
+        target_df: pd.DataFrame,
+        raw_df: pd.DataFrame,
+        user_filter_text: str,
+        threshold: float = DEFAULT_DEFECT_THRESHOLD,
 ) -> str:
     if len(target_df) == 0:
         return "현재 데이터의 핵심 현황, 이상·주의 항목, 원인 가설 및 실무 조치 제안을 정리해 줘."
@@ -645,14 +650,14 @@ def _filter_within_target_df(user_q: str, target_df: pd.DataFrame) -> pd.DataFra
 
 
 def _execute_chat_turn(
-    user_q: str,
-    chat_model: str,
-    target_df: pd.DataFrame,
-    raw_df: pd.DataFrame,
-    active_filter_text: str,
-    stat_summary_str: str,
-    verdict_now: str,
-    defect_threshold: float,
+        user_q: str,
+        chat_model: str,
+        target_df: pd.DataFrame,
+        raw_df: pd.DataFrame,
+        active_filter_text: str,
+        stat_summary_str: str,
+        verdict_now: str,
+        defect_threshold: float,
 ):
     st.session_state["chat_history"].append({"role": "user", "content": user_q})
 
@@ -663,19 +668,20 @@ def _execute_chat_turn(
         first_m = next(iter(st.session_state["saved_results"].values()))
         saved_rep_context = f"\n[직전 3번 AI 분석 리포트 요약]\n{first_m.get('report', '')[:1200]}\n"
 
+    # [데이터 다이어트] 100건에서 10건(최대 15건)으로 엄격하게 제한하여 ITPM 오류 원천 차단
     if len(matched_sub_df) > 0:
         sub_rows_str = (
-            f"\n[질문 조건에 정확히 매칭된 행 — 총 {len(matched_sub_df)}건 전수 명단]\n"
-            f"{_build_compact_sample_str(matched_sub_df, max_rows=len(matched_sub_df))}\n"
+            f"\n[질문 조건에 정확히 매칭된 행 — 핵심 요약 샘플]\n"
+            f"{_build_compact_sample_str(matched_sub_df, max_rows=15)}\n"
         )
     else:
         sub_rows_str = (
-            f"\n[현재 조회된 전체 데이터 행 — 총 {len(target_df)}건 명단]\n"
-            f"{_build_compact_sample_str(target_df, max_rows=min(len(target_df), 100))}\n"
+            f"\n[현재 조회된 전체 데이터 행 — 핵심 요약 샘플]\n"
+            f"{_build_compact_sample_str(target_df, max_rows=10)}\n"
         )
 
     recent_turns = "\n".join(
-        f"{'사용자' if m['role']=='user' else 'AI비서'}: {m['content'][:250]}"
+        f"{'사용자' if m['role'] == 'user' else 'AI비서'}: {m['content'][:250]}"
         for m in st.session_state["chat_history"][-5:-1]
     )
     scope_desc = f"검색조건('{active_filter_text}') 필터링된 {len(target_df)}건 (전체 원본 {len(raw_df)}건 중)" if active_filter_text else f"전체 {len(target_df)}건"
@@ -684,8 +690,8 @@ def _execute_chat_turn(
 아래 [파이썬 집계표 (컬럼별 미기입 해당 TC ID 전수 명단 포함)]와 [질문 조건에 정확히 매칭된 행]을 보고 **핵심 결론(해당 TC ID와 Title 등)을 3~6줄 이내의 불릿(- )으로 즉시 답변**하십시오.
 
 [절대 준수 규칙]
-1. **[샘플 핑계 절대 금지]** 아래 집계표의 `미기입(공란) 해당 TC ID 목록` 칸과 `[매칭된 행 전수 명단]`에 전체 {len(target_df)}건에 대한 모든 TC ID가 이미 100% 포함되어 있습니다. 절대 "샘플(TC-001~TC-015)에 포함되지 않아 알 수 없다"거나 "전체 데이터를 추가 조회해야 한다"는 말을 하지 마십시오!
-2. 사용자가 특정 컬럼의 미기입(예: Procedure 미기입 1건, Expected Result 미기입 4건)이 어느 TC인지 물으면, 아래 표에 적힌 **정확한 TC ID와 Title**을 빠짐없이 바로 알려주십시오.
+1. **[샘플 핑계 절대 금지]** 아래 집계표의 `미기입(공란) 해당 TC ID 목록` 칸에 전체 {len(target_df)}건에 대한 모든 TC ID가 이미 100% 포함되어 있습니다. "샘플에 포함되지 않아 알 수 없다"는 말을 절대 하지 마십시오!
+2. 사용자가 특정 컬럼의 미기입(예: Procedure 미기입)이 어느 TC인지 물으면, 아래 표에 적힌 **정확한 TC ID와 Title**을 빠짐없이 바로 알려주십시오.
 
 [현재 데이터 메모리 범위]: {scope_desc}
 [사내 기준({defect_threshold}%) 판정]: {verdict_now}
@@ -711,13 +717,13 @@ def _execute_chat_turn(
 
 
 def render_chat_messenger_ui(
-    target_df: pd.DataFrame,
-    raw_df: pd.DataFrame,
-    active_filter_text: str,
-    aux_sheets: dict[str, pd.DataFrame],
-    defect_threshold: float,
-    key_suffix: str = "inline",
-    chat_height: int = 380,
+        target_df: pd.DataFrame,
+        raw_df: pd.DataFrame,
+        active_filter_text: str,
+        aux_sheets: dict[str, pd.DataFrame],
+        defect_threshold: float,
+        key_suffix: str = "inline",
+        chat_height: int = 380,
 ):
     stat_summary_str = "\n\n".join(
         f"■ {k}\n{v.to_string(index=False)}"
@@ -798,11 +804,11 @@ def render_chat_messenger_ui(
 
 
 def render_floating_popup_chat_window(
-    target_df: pd.DataFrame,
-    raw_df: pd.DataFrame,
-    active_filter_text: str,
-    aux_sheets: dict[str, pd.DataFrame],
-    defect_threshold: float,
+        target_df: pd.DataFrame,
+        raw_df: pd.DataFrame,
+        active_filter_text: str,
+        aux_sheets: dict[str, pd.DataFrame],
+        defect_threshold: float,
 ):
     with st.container():
         st.markdown('<div id="floating-chat-marker"></div>', unsafe_allow_html=True)
@@ -868,9 +874,9 @@ def render_floating_popup_chat_window(
 
 
 def export_consistency_benchmark_to_docx(
-    target_df: pd.DataFrame,
-    bench_data: dict,
-    defect_threshold: float,
+        target_df: pd.DataFrame,
+        bench_data: dict,
+        defect_threshold: float,
 ) -> bytes:
     def _p(text: str, bold: bool = False, size_hp: int = 20, color: str = "1F2937", before: int = 0, after: int = 80) -> str:
         t_esc = escape(str(text))
@@ -897,7 +903,7 @@ def export_consistency_benchmark_to_docx(
         xml_parts = [f'<w:tbl><w:tblPr><w:tblW w:w="5000" w:type="pct"/>{borders}{mar}</w:tblPr><w:tblGrid>{grid}</w:tblGrid>']
 
         h_cells = [
-            f'<w:tc><w:tcPr><w:tcW w:w="{widths_pct[i]*50}" w:type="pct"/><w:shd w:val="clear" w:color="auto" w:fill="059669"/></w:tcPr>'
+            f'<w:tc><w:tcPr><w:tcW w:w="{widths_pct[i] * 50}" w:type="pct"/><w:shd w:val="clear" w:color="auto" w:fill="059669"/></w:tcPr>'
             f'{_p(h, bold=True, size_hp=18, color="FFFFFF", after=0)}</w:tc>'
             for i, h in enumerate(headers)
         ]
@@ -909,8 +915,8 @@ def export_consistency_benchmark_to_docx(
             for c_i, val in enumerate(r):
                 bg = "F0FDF4" if c_i == 0 else bg_default
                 lines = [l.strip() for l in str(val or "-").splitlines() if l.strip()] or ["-"]
-                p_list = "".join(_p(l, bold=(c_i == 0), size_hp=17, color="111827", after=40 if idx < len(lines)-1 else 0) for idx, l in enumerate(lines))
-                r_cells.append(f'<w:tc><w:tcPr><w:tcW w:w="{widths_pct[c_i]*50}" w:type="pct"/><w:shd w:val="clear" w:color="auto" w:fill="{bg}"/></w:tcPr>{p_list}</w:tc>')
+                p_list = "".join(_p(l, bold=(c_i == 0), size_hp=17, color="111827", after=40 if idx < len(lines) - 1 else 0) for idx, l in enumerate(lines))
+                r_cells.append(f'<w:tc><w:tcPr><w:tcW w:w="{widths_pct[c_i] * 50}" w:type="pct"/><w:shd w:val="clear" w:color="auto" w:fill="{bg}"/></w:tcPr>{p_list}</w:tc>')
             xml_parts.append(f'<w:tr><w:trPr><w:cantSplit/></w:trPr>{"".join(r_cells)}</w:tr>')
         xml_parts.append("</w:tbl>")
         return "".join(xml_parts)
@@ -1017,9 +1023,9 @@ def show_model_visual_popup(m_code: str, res_data: dict, target_df: pd.DataFrame
 
 @st.fragment
 def render_visualization_fragment(
-    target_df: pd.DataFrame,
-    aux_sheets: dict[str, pd.DataFrame],
-    defect_threshold: float,
+        target_df: pd.DataFrame,
+        aux_sheets: dict[str, pd.DataFrame],
+        defect_threshold: float,
 ):
     st.subheader("2️⃣ 조회된 데이터 다차원 시각화 & 한글 기초통계 집계")
     v_tab1, v_tab2, v_tab3 = st.tabs([
@@ -1079,14 +1085,14 @@ def render_visualization_fragment(
 
 
 def render_agent_analysis_section(
-    target_df: pd.DataFrame,
-    raw_df: pd.DataFrame,
-    summary_df: pd.DataFrame,
-    selected_models: list[str],
-    active_filter_text: str,
-    aux_sheets: dict[str, pd.DataFrame],
-    defect_threshold: float,
-    pipeline_slot,
+        target_df: pd.DataFrame,
+        raw_df: pd.DataFrame,
+        summary_df: pd.DataFrame,
+        selected_models: list[str],
+        active_filter_text: str,
+        aux_sheets: dict[str, pd.DataFrame],
+        defect_threshold: float,
+        pipeline_slot,
 ):
     st.subheader("3️⃣ AI 비서 맞춤 질문 & 에이전트 동시 비교 분석 (Groq vs Gemini vs Ollama 정밀 모드)")
 
@@ -1142,6 +1148,7 @@ def render_agent_analysis_section(
                 f"■ {k}\n{v.to_string(index=False)}"
                 for k, v in build_korean_stat_tables(target_df, aux_sheets=aux_sheets, threshold=defect_threshold).items()
             )
+            # [다이어트 적용] 100건 -> 10건(최대 10건)으로 전송하여 입력 토큰 크기 대폭 감소
             compact_sample_str = _build_compact_sample_str(target_df, max_rows=10)
 
             data_info = (
@@ -1314,11 +1321,11 @@ def render_agent_analysis_section(
 
 @st.fragment
 def render_advanced_extensions_hub(
-    target_df: pd.DataFrame,
-    raw_df: pd.DataFrame,
-    active_filter_text: str,
-    aux_sheets: dict[str, pd.DataFrame],
-    defect_threshold: float,
+        target_df: pd.DataFrame,
+        raw_df: pd.DataFrame,
+        active_filter_text: str,
+        aux_sheets: dict[str, pd.DataFrame],
+        defect_threshold: float,
 ):
     st.subheader("4️⃣ 대화형 후속 질문 채팅방 (Chatflow) & 3회 반복 일관성 상세 검증기")
 
@@ -1396,7 +1403,10 @@ def render_advanced_extensions_hub(
         if st.button("▶️ 3회 연속 실행 및 '일관성 vs 차이점' 상세 비교 시작", type="primary", key="run_3x_bench_btn"):
             agent_app = build_agent_graph()
             q_bench = generate_smart_assistant_question(target_df, raw_df, active_filter_text, threshold=defect_threshold)
+
+            # [다이어트 적용] 반복 검증 시에도 토큰 초과를 막기 위해 최대 10건 요약 적용
             compact_sample_str = _build_compact_sample_str(target_df, max_rows=10)
+
             data_info_bench = (
                 f"[조회 조건]: {active_filter_text or '전체 데이터'}\n"
                 f"[조회 데이터 건수]: {len(target_df)}건\n"
@@ -1442,7 +1452,7 @@ def render_advanced_extensions_hub(
                     "실행 회차": f"{run_i}회차",
                     "AI 모델": MODEL_LABELS.get(bench_model, bench_model),
                     "소요 시간(초)": el_i,
-                    "4대 필수 목차": f"{sec_hits}/4개 ({int(sec_hits/4*100)}%)",
+                    "4대 필수 목차": f"{sec_hits}/4개 ({int(sec_hits / 4 * 100)}%)",
                     f"총 건수({total_cnt_str}건)": has_exact_count,
                     f"기준({defect_threshold}%) 판정": verdict_match,
                     "인용된 비중(%) 수치": ", ".join(sorted(list(nums_found))[:5]) or "-",
@@ -1544,7 +1554,7 @@ def render_advanced_extensions_hub(
                 r_c1, r_c2, r_c3 = st.columns(3)
                 for idx, col_ui in enumerate([r_c1, r_c2, r_c3]):
                     with col_ui:
-                        st.markdown(f"**■ {idx+1}회차 원문**")
+                        st.markdown(f"**■ {idx + 1}회차 원문**")
                         st.markdown(c_data["raw_reports"][idx])
 
 
@@ -1692,7 +1702,6 @@ if uploaded_files:
         st.session_state["chat_popup_mode"] = False
         st.session_state["consistency_data"] = None
 
-
 with st.sidebar:
     st.header("⚙️ 실행 및 비교 모델 설정")
     if st.button("🔄 업로드 파일 & 전체 입력 초기화", key="sidebar_reset_all", type="primary", use_container_width=True):
@@ -1740,7 +1749,6 @@ with st.sidebar:
     with st.expander("🖥️ 로컬 Ollama 상세 설정 & 모델 안내 (클릭)", expanded=False):
         chosen_ollama = st.selectbox("구동할 로컬 모델 변경", options=ollama_models, index=0)
         os.environ["LOCAL_MODEL_NAME"] = chosen_ollama
-
 
 pipeline_slot = st.empty()
 
