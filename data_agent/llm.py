@@ -50,7 +50,8 @@ def _get_active_groq_models(api_key: str) -> list[str]:
             avail = [
                 m["id"]
                 for m in data.get("data", [])
-                if "id" in m and not any(w in m["id"].lower() for w in ["whisper", "tts", "guard", "vision", "audio", "canopylabs", "tool-use"])
+                # 약관 동의 필요 모델(canopylabs) 등 필터링 강화
+                if "id" in m and not any(w in m["id"].lower() for w in ["whisper", "tts", "guard", "vision", "audio", "canopylabs", "tool-use", "llama-guard"])
             ]
             ordered = [m for m in preferred if m in avail]
             for m in avail:
@@ -90,7 +91,7 @@ def call_llm(prompt: str, mode: str = "local_ollama") -> tuple[str, float]:
             client = OpenAI(api_key=api_key, base_url="https://api.groq.com/openai/v1")
             candidates = _get_active_groq_models(api_key)
             last_err = None
-            # 무료 티어 토큰 제한(TPM) 에러 방지를 위해 프롬프트 길이를 물리적으로 제한 (약 6000자 이내)
+            # 무료 티어 토큰 제한(TPM/OTPM) 에러 방지를 위해 프롬프트 길이를 물리적으로 제한 (약 15000자 이내)
             safe_prompt = prompt if len(prompt) < 15000 else prompt[:15000] + "\n...[데이터 길이 초과로 요약됨]"
 
             for m_name in candidates[:3]:
@@ -105,6 +106,7 @@ def call_llm(prompt: str, mode: str = "local_ollama") -> tuple[str, float]:
                             {"role": "user", "content": safe_prompt},
                         ],
                         temperature=0.2,
+                        # 출력 토큰을 1500으로 제한하여 OTPM(Output Tokens Per Minute) 초과 방지
                         max_tokens=1500,
                     )
                     txt = resp.choices[0].message.content or ""
@@ -113,9 +115,9 @@ def call_llm(prompt: str, mode: str = "local_ollama") -> tuple[str, float]:
                         return header + txt.strip(), round(time.perf_counter() - t0, 2)
                 except Exception as e:
                     last_err = e
-                    # 413 에러(TPM 초과) 발생 시, 다음 모델로 넘어가지 않고 즉시 에러 반환 (계속 시도해봤자 동일함)
-                    if "413" in str(e):
-                        return f"⚠️ Groq 토큰 한도 초과 에러: 입력된 데이터가 너무 많습니다. 조회 조건을 더 좁혀서 검색해 주세요.\n({last_err})", round(time.perf_counter() - t0, 2)
+                    # 413 또는 429 에러 발생 시(TPM/OTPM 초과), 다음 모델로 넘어가지 않고 즉시 에러 반환
+                    if any(err_code in str(e) for err_code in ["413", "429"]):
+                        return f"⚠️ Groq 토큰 한도 초과 에러: 입력된 데이터나 예상 출력량이 너무 많습니다. 조회 조건을 더 좁혀서 검색해 주세요.\n({last_err})", round(time.perf_counter() - t0, 2)
                     continue
             return f"⚠️ Groq API 호출 오류: {last_err}", round(time.perf_counter() - t0, 2)
         except Exception as e:
