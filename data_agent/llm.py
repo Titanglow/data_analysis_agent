@@ -31,10 +31,7 @@ def get_installed_ollama_models() -> list[str]:
 
 
 def _get_active_groq_models(api_key: str) -> list[str]:
-    """
-    Groq 서버에서 현재 계정이 사용 가능한 최신 활성 텍스트 모델 목록을 조회합니다.
-    (약관 동의 모델이나 토큰 한도가 적은 모델을 원천 차단하고 가장 안정적인 모델만 반환)
-    """
+    """Groq 서버에서 안정적인 텍스트 모델 목록을 조회합니다."""
     preferred = [
         "llama-3.3-70b-versatile",
         "llama-3.1-8b-instant",
@@ -60,25 +57,24 @@ def _get_active_groq_models(api_key: str) -> list[str]:
         return preferred
 
 
-def call_llm(prompt: str, mode: str = "local_ollama") -> tuple[str, float]:
+# [RAG 추가] knowledge_context 파라미터를 추가로 받습니다.
+def call_llm(prompt: str, mode: str = "local_ollama", knowledge_context: str = "") -> tuple[str, float]:
     """선택된 모드로 LLM을 호출하고 (응답 텍스트, 소요 시간 초)를 반환합니다."""
     load_dotenv(dotenv_path=ENV_PATH, override=True)
     t0 = time.perf_counter()
 
     if mode == "mock":
         time.sleep(0.15)
-        sample = (
-            "### 1. 전체 검증 데이터 요약 및 사내 기준 판정 현황\n"
-            "- 파이썬 정밀 집계 결과 전체 데이터 건수 및 주요 분류 항목이 정상 확인되었습니다.\n\n"
-            "### 2. 실제 분류 컬럼별 분포 & 주요 시나리오 그룹핑 심층 분석\n"
-            "- 상위 집중 분류 항목과 핵심 시나리오 그룹의 비중(%)이 사내 관리 기준에 맞춰 분석되었습니다.\n\n"
-            "### 3. 데이터 품질 리스크 및 취약 구간 진단\n"
-            "- 미기입(공란/N/A) 항목 및 특정 모듈 편중 구간에 대한 보완이 필요합니다.\n\n"
-            "### 4. 실무 조치 제안 (시점별 로드맵 및 R&R)\n"
-            "- **즉시 조치 (24시간 내 / 담당팀)**: 기준 초과 미기입 항목 및 주의 대상 우선 점검\n"
-            "- **근본 대책 (1개월 내 / 품질관리 파트)**: 취약 구간 시나리오 확충 및 템플릿 표준화"
+        return "테스트 응답입니다.", round(time.perf_counter() - t0, 2)
+
+    # [RAG 핵심] 시스템 프롬프트에 사내 지식 문서를 강제 주입합니다.
+    sys_prompt = "당신은 사내 데이터 분석 수석 전문가입니다. 원본 샘플 행 데이터를 통째로 나열하지 말고, 요청된 질문에 대해 간결하고 명확하게 답변하십시오."
+    if knowledge_context:
+        sys_prompt += (
+            "\n\n[사내 규정 및 참고 지식 (RAG)]\n"
+            "아래 제공된 사내 지식 문서를 반드시 참고하여 조치 제안이나 원인을 작성하십시오.\n"
+            f"{knowledge_context}"
         )
-        return sample, round(time.perf_counter() - t0, 2)
 
     if mode == "cloud_groq":
         api_key = os.getenv("GROQ_API_KEY", "").strip()
@@ -90,22 +86,19 @@ def call_llm(prompt: str, mode: str = "local_ollama") -> tuple[str, float]:
             candidates = _get_active_groq_models(api_key)
             last_err = None
 
-            # [최종 다이어트 방어선] 프롬프트 문자열 길이를 물리적으로 10,000자(약 3~4천 토큰) 이내로 강제 절단
-            safe_prompt = prompt if len(prompt) < 10000 else prompt[:10000] + "\n\n...[이하 데이터 초과로 생략됨. 앞선 통계표 위주로 답변할 것.]"
+            # 토큰 방어선
+            safe_prompt = prompt if len(prompt) < 10000 else prompt[:10000] + "\n\n...[데이터 생략]"
 
             for m_name in candidates[:3]:
                 try:
                     resp = client.chat.completions.create(
                         model=m_name,
                         messages=[
-                            {
-                                "role": "system",
-                                "content": "당신은 사내 데이터 분석 수석 전문가입니다. 원본 샘플 행 데이터를 통째로 나열하지 말고, 요청된 질문에 대해 간결하고 명확하게 답변하십시오.",
-                            },
+                            {"role": "system", "content": sys_prompt},
                             {"role": "user", "content": safe_prompt},
                         ],
                         temperature=0.2,
-                        max_tokens=900,  # OTPM 에러 방지를 위해 900 토큰으로 제한
+                        max_tokens=900,
                     )
                     txt = resp.choices[0].message.content or ""
                     if txt.strip():
@@ -113,9 +106,8 @@ def call_llm(prompt: str, mode: str = "local_ollama") -> tuple[str, float]:
                         return header + txt.strip(), round(time.perf_counter() - t0, 2)
                 except Exception as e:
                     last_err = e
-                    # 413, 429 에러(토큰 초과) 발생 시 즉시 중단 및 안내 반환
                     if any(err_code in str(e) for err_code in ["413", "429"]):
-                        return f"⚠️ Groq 무료 API 토큰 한도 초과: 데이터 크기가 너무 큽니다. 검색 조건을 좁혀서(예: '상위 5건만') 다시 시도해 주세요.\n({last_err})", round(time.perf_counter() - t0, 2)
+                        return f"⚠️ Groq 토큰 한도 초과: 검색 조건을 좁혀주세요.\n({last_err})", round(time.perf_counter() - t0, 2)
                     continue
             return f"⚠️ Groq API 호출 오류: {last_err}", round(time.perf_counter() - t0, 2)
         except Exception as e:
@@ -144,9 +136,13 @@ def call_llm(prompt: str, mode: str = "local_ollama") -> tuple[str, float]:
                 candidates = preferred_gemini
 
             last_err = None
+
+            # Gemini 프롬프트 병합
+            gemini_prompt = f"{sys_prompt}\n\n[사용자 요청]\n{prompt}"
+
             for m_name in candidates[:4]:
                 try:
-                    resp = client.models.generate_content(model=m_name, contents=prompt)
+                    resp = client.models.generate_content(model=m_name, contents=gemini_prompt)
                     txt = getattr(resp, "text", "") or ""
                     if txt.strip():
                         header = f"*(연결 모델: Google `{m_name}`)*\n\n"
@@ -161,9 +157,10 @@ def call_llm(prompt: str, mode: str = "local_ollama") -> tuple[str, float]:
     base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
     local_model = os.getenv("LOCAL_MODEL_NAME", "qwen2.5-coder:7b")
     try:
+        ollama_prompt = f"{sys_prompt}\n\n[사용자 요청]\n{prompt}"
         payload = json.dumps({
             "model": local_model,
-            "prompt": prompt,
+            "prompt": ollama_prompt,
             "stream": False,
             "options": {
                 "temperature": 0.2,

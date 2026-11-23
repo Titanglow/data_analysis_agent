@@ -8,6 +8,7 @@ from pathlib import Path
 from datetime import datetime
 import pandas as pd
 import openpyxl
+import docx
 
 DB_PATH = Path("internal_analysis.db")
 TABLE_NAME = "internal_data"
@@ -344,3 +345,27 @@ def export_db_to_sql_script(current_sql: str = "") -> bytes:
                 lines.append(dump_line)
 
     return "\n".join(lines).encode("utf-8-sig")
+
+
+def extract_knowledge_text(uploaded_files: list) -> str:
+    """
+    RAG(검색 증강 생성)를 위해 업로드된 참고 문서(Word, TXT)에서 텍스트를 추출합니다.
+    """
+    knowledge_parts = []
+    for f_obj in uploaded_files:
+        ext = Path(f_obj.name).suffix.lower()
+        try:
+            if ext == ".txt":
+                text = f_obj.read().decode("utf-8", errors="ignore")
+                # 토큰 초과 방지를 위해 문서당 앞 3000자만 추출
+                knowledge_parts.append(f"[{f_obj.name} 내용]\n{text[:3000]}")
+            elif ext == ".docx":
+                doc = docx.Document(f_obj)
+                text = "\n".join([p.text for p in doc.paragraphs if p.text.strip()])
+                knowledge_parts.append(f"[{f_obj.name} 내용]\n{text[:3000]}")
+        except Exception as e:
+            knowledge_parts.append(f"[{f_obj.name} 읽기 실패: {e}]")
+
+    # 전체 지식 문맥 반환 (최대 약 6000자 제한)
+    combined_knowledge = "\n\n".join(knowledge_parts)
+    return combined_knowledge[:6000]

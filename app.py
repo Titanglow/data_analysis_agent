@@ -39,6 +39,7 @@ from data_agent.tools.data_loader import (
     filter_by_keywords,
     run_sql_query,
     export_db_to_sql_script,
+    extract_knowledge_text,  # RAG 지식 추출 함수 Import 추가
     DB_PATH,
     TABLE_NAME,
 )
@@ -131,17 +132,18 @@ st.markdown(
 )
 
 
-def _build_compact_sample_str(df: pd.DataFrame, max_rows: int = 10) -> str:
-    """
-    [데이터 다이어트]
-    전체 데이터를 모두 LLM으로 보내면 토큰 초과 에러가 발생하므로,
-    최대 10개의 핵심 샘플 행만 간결하게 잘라서 전송합니다.
-    """
+def _build_compact_sample_str(df: pd.DataFrame, max_rows: int = 5) -> str:
     if df is None or len(df) == 0:
         return "데이터 없음"
-    sub = df.head(max_rows).copy()
+
+    important_cols = [c for c in df.columns if any(k in str(c).lower() for k in ["id", "title", "procedure", "result", "status", "priority", "domain", "라인", "생산", "불량"])]
+    if not important_cols:
+        important_cols = list(df.columns[:10])
+
+    sub = df[important_cols].head(max_rows).copy()
     for c in sub.columns:
-        sub[c] = sub[c].apply(lambda x: shorten_long_label(str(x).replace("\n", " "), 38))
+        sub[c] = sub[c].apply(lambda x: shorten_long_label(str(x).replace("\n", " "), 20))
+
     return sub.to_string(index=False)
 
 
@@ -658,6 +660,7 @@ def _execute_chat_turn(
         stat_summary_str: str,
         verdict_now: str,
         defect_threshold: float,
+        rag_knowledge_text: str,  # RAG 지식 추가
 ):
     st.session_state["chat_history"].append({"role": "user", "content": user_q})
 
@@ -668,16 +671,15 @@ def _execute_chat_turn(
         first_m = next(iter(st.session_state["saved_results"].values()))
         saved_rep_context = f"\n[직전 3번 AI 분석 리포트 요약]\n{first_m.get('report', '')[:1200]}\n"
 
-    # [데이터 다이어트] 100건에서 10건(최대 15건)으로 엄격하게 제한하여 ITPM 오류 원천 차단
     if len(matched_sub_df) > 0:
         sub_rows_str = (
-            f"\n[질문 조건에 정확히 매칭된 행 — 핵심 요약 샘플]\n"
-            f"{_build_compact_sample_str(matched_sub_df, max_rows=15)}\n"
+            f"\n[질문 조건에 매칭된 행 — 핵심 3건 샘플]\n"
+            f"{_build_compact_sample_str(matched_sub_df, max_rows=3)}\n"
         )
     else:
         sub_rows_str = (
-            f"\n[현재 조회된 전체 데이터 행 — 핵심 요약 샘플]\n"
-            f"{_build_compact_sample_str(target_df, max_rows=10)}\n"
+            f"\n[현재 조회된 전체 데이터 행 — 핵심 3건 샘플]\n"
+            f"{_build_compact_sample_str(target_df, max_rows=3)}\n"
         )
 
     recent_turns = "\n".join(
@@ -687,11 +689,7 @@ def _execute_chat_turn(
     scope_desc = f"검색조건('{active_filter_text}') 필터링된 {len(target_df)}건 (전체 원본 {len(raw_df)}건 중)" if active_filter_text else f"전체 {len(target_df)}건"
 
     chat_prompt = f"""당신은 사용자와 실시간으로 대화하는 정확하고 명쾌한 '사내 데이터 AI 비서'입니다.
-아래 [파이썬 집계표 (컬럼별 미기입 해당 TC ID 전수 명단 포함)]와 [질문 조건에 정확히 매칭된 행]을 보고 **핵심 결론(해당 TC ID와 Title 등)을 3~6줄 이내의 불릿(- )으로 즉시 답변**하십시오.
-
-[절대 준수 규칙]
-1. **[샘플 핑계 절대 금지]** 아래 집계표의 `미기입(공란) 해당 TC ID 목록` 칸에 전체 {len(target_df)}건에 대한 모든 TC ID가 이미 100% 포함되어 있습니다. "샘플에 포함되지 않아 알 수 없다"는 말을 절대 하지 마십시오!
-2. 사용자가 특정 컬럼의 미기입(예: Procedure 미기입)이 어느 TC인지 물으면, 아래 표에 적힌 **정확한 TC ID와 Title**을 빠짐없이 바로 알려주십시오.
+아래 [파이썬 집계표 (컬럼별 미기입 해당 TC ID 전수 명단 포함)]를 보고 **핵심 결론(해당 TC ID와 Title 등)을 3~6줄 이내의 불릿(- )으로 즉시 답변**하십시오.
 
 [현재 데이터 메모리 범위]: {scope_desc}
 [사내 기준({defect_threshold}%) 판정]: {verdict_now}
@@ -705,9 +703,12 @@ def _execute_chat_turn(
 [사용자 채팅 질문]
 {user_q}
 """
-    ans_text, ans_el = call_llm(chat_prompt, mode=chat_model)
+    # RAG 지식을 함께 넘겨줌
+    ans_text, ans_el = call_llm(chat_prompt, mode=chat_model, knowledge_context=rag_knowledge_text)
     model_short = MODEL_LABELS.get(chat_model, chat_model).split("(")[0].strip()
-    final_ans = f"**{model_short}** (`{ans_el}초` · 조회범위: `전체 {len(target_df)}건 전수 확인`)\n\n{ans_text}"
+
+    rag_badge = " + 📚 RAG 사내 지식 연동" if rag_knowledge_text else ""
+    final_ans = f"**{model_short}** (`{ans_el}초` · 조회범위: `전체 {len(target_df)}건 전수 확인`{rag_badge})\n\n{ans_text}"
 
     st.session_state["chat_history"].append({
         "role": "assistant",
@@ -722,6 +723,7 @@ def render_chat_messenger_ui(
         active_filter_text: str,
         aux_sheets: dict[str, pd.DataFrame],
         defect_threshold: float,
+        rag_knowledge_text: str,
         key_suffix: str = "inline",
         chat_height: int = 380,
 ):
@@ -736,6 +738,9 @@ def render_chat_messenger_ui(
     top_c1, top_c2, top_c3 = st.columns([2.0, 1.3, 0.7])
     with top_c1:
         mem_badge = "✅ 3번 리포트 + 미기입 TC ID 전수 명단 연동됨" if has_prev_rep else "📊 전수 데이터·미기입 ID 명단 연동됨"
+        if rag_knowledge_text:
+            mem_badge += " + 📚 RAG 사내 지식 연동"
+
         st.markdown(
             f'<div style="background:#ecfdf5; border:1px solid #10b981; border-radius:8px; padding:8px 12px; font-size:0.82rem; color:#065f46; font-weight:600;">'
             f'🧠 <b>메모리:</b> {filter_badge} (기준 {defect_threshold}%) | {mem_badge}'
@@ -765,8 +770,8 @@ def render_chat_messenger_ui(
         triggered_q = f"현재 조회된 {len(target_df)}건에서 사내 기준({defect_threshold}%) 이상이거나 가장 비중이 큰 상위 3개 항목의 건수와 비중을 요약해줘."
     if chip_c3.button("📋 분석 데이터 핵심 5줄 요약", key=f"chip3_{key_suffix}", use_container_width=True):
         triggered_q = f"현재 분석한 {len(target_df)}건 데이터의 핵심 현황과 주요 분포 특징, 확인 필요 사항을 한눈에 파악할 수 있게 5줄 이내로 깔끔하게 요약해줘."
-    if chip_c4.button("🧪 예외·경계값 테스트 추천", key=f"chip4_{key_suffix}", use_container_width=True):
-        triggered_q = f"현재 조회된 {len(target_df)}건 데이터의 주요 기능을 바탕으로 추가로 보강하면 좋을 예외 처리(Negative) 또는 경계값 테스트 시나리오 3가지만 추천해줘."
+    if chip_c4.button("🧪 사내 지식 기반 조치 제안", key=f"chip4_{key_suffix}", use_container_width=True):
+        triggered_q = f"업로드된 사내 규정이나 회의록 지식이 있다면 이를 반드시 인용해서, 이 데이터의 취약점에 대한 실무 조치 제안 3가지를 정리해줘."
 
     user_input = st.chat_input(
         f"전체 {len(target_df):,}건에 대해 질문하세요 (예: Procedure 미기입 1건 무슨 TC야? / Expected Result 미기입 4건 알려줘)...",
@@ -785,6 +790,7 @@ def render_chat_messenger_ui(
                 stat_summary_str,
                 verdict_now,
                 defect_threshold,
+                rag_knowledge_text,
             )
 
     chat_box = st.container(height=chat_height, border=True)
@@ -809,6 +815,7 @@ def render_floating_popup_chat_window(
         active_filter_text: str,
         aux_sheets: dict[str, pd.DataFrame],
         defect_threshold: float,
+        rag_knowledge_text: str,
 ):
     with st.container():
         st.markdown('<div id="floating-chat-marker"></div>', unsafe_allow_html=True)
@@ -817,7 +824,7 @@ def render_floating_popup_chat_window(
         with h_c1:
             st.markdown(
                 f'<div style="background:#059669; color:white; padding:7px 12px; border-radius:8px; font-weight:700; font-size:0.9rem;">'
-                f'💬 팝업 채팅창 (전체 {len(target_df):,}건 전수 연동)'
+                f'💬 팝업 채팅창 (전체 {len(target_df):,}건 연동)'
                 f'</div>',
                 unsafe_allow_html=True,
             )
@@ -868,6 +875,7 @@ def render_floating_popup_chat_window(
             active_filter_text=active_filter_text,
             aux_sheets=aux_sheets,
             defect_threshold=defect_threshold,
+            rag_knowledge_text=rag_knowledge_text,
             key_suffix="floating_popup",
             chat_height=310,
         )
@@ -1093,6 +1101,7 @@ def render_agent_analysis_section(
         aux_sheets: dict[str, pd.DataFrame],
         defect_threshold: float,
         pipeline_slot,
+        rag_knowledge_text: str,  # RAG 추가
 ):
     st.subheader("3️⃣ AI 비서 맞춤 질문 & 에이전트 동시 비교 분석 (Groq vs Gemini vs Ollama 정밀 모드)")
 
@@ -1119,7 +1128,11 @@ def render_agent_analysis_section(
 
     btn_c1, btn_c2 = st.columns([3, 1])
     with btn_c1:
-        run_clicked = st.button("🚀 에이전트 정밀 분석 실행 (선택 모델 동시 병렬 실행)", type="primary", use_container_width=True)
+        # 버튼에 RAG 연동 상태 표시
+        btn_label = "🚀 에이전트 정밀 분석 실행 (선택 모델 동시 병렬 실행)"
+        if rag_knowledge_text:
+            btn_label = "🚀 에이전트 정밀 분석 실행 (사내 규정 RAG 연동 완료)"
+        run_clicked = st.button(btn_label, type="primary", use_container_width=True)
     with btn_c2:
         if st.button("🔄 파일·입력 전체 초기화", key="reset_btn_bottom", use_container_width=True):
             reset_all_inputs_and_files()
@@ -1148,8 +1161,8 @@ def render_agent_analysis_section(
                 f"■ {k}\n{v.to_string(index=False)}"
                 for k, v in build_korean_stat_tables(target_df, aux_sheets=aux_sheets, threshold=defect_threshold).items()
             )
-            # [다이어트 적용] 100건 -> 10건(최대 10건)으로 전송하여 입력 토큰 크기 대폭 감소
-            compact_sample_str = _build_compact_sample_str(target_df, max_rows=10)
+
+            compact_sample_str = _build_compact_sample_str(target_df, max_rows=5)
 
             data_info = (
                 f"[분석 일시]: {analyzed_at_now}\n"
@@ -1167,13 +1180,22 @@ def render_agent_analysis_section(
                 f"**[1~2단계 완료]** 총 `{len(target_df):,}건` 전수 로드 및 미기입 ID 명단 집계 완료 (분석 일시: `{analyzed_at_now}`, 기준값: `{defect_threshold}%`)",
                 f"**[3단계 가동]** 선택 모델 `{len(selected_models)}개` 병렬 추론 시작",
             ]
+
+            if rag_knowledge_text:
+                logs.append(f"**[RAG 연동]** 업로드된 사내 규정/회의록 지식 문서 성공적으로 읽기 완료, 에이전트에 지식 주입됨.")
+
             status_box = st.status("⚡ 선택한 AI 모델(정밀 모드)들을 동시에 병렬 실행하고 있습니다...", expanded=True)
 
             def _run_single_model(m_code: str):
+                # graph.py를 통하는 방식이라 일단 데이터 요약(data_summary)에 RAG 지식을 통째로 붙여서 넘깁니다.
+                enhanced_data_info = data_info
+                if rag_knowledge_text:
+                    enhanced_data_info += f"\n\n[사내 규정 및 참고 지식 (RAG)]\n{rag_knowledge_text}"
+
                 res = agent_app.invoke({
                     "question": question,
                     "mode": m_code,
-                    "data_summary": data_info,
+                    "data_summary": enhanced_data_info,
                     "defect_threshold": defect_threshold,
                     "analysis_result": {},
                     "report": "",
@@ -1326,6 +1348,7 @@ def render_advanced_extensions_hub(
         active_filter_text: str,
         aux_sheets: dict[str, pd.DataFrame],
         defect_threshold: float,
+        rag_knowledge_text: str,
 ):
     st.subheader("4️⃣ 대화형 후속 질문 채팅방 (Chatflow) & 3회 반복 일관성 상세 검증기")
 
@@ -1352,6 +1375,7 @@ def render_advanced_extensions_hub(
                 active_filter_text=active_filter_text,
                 aux_sheets=aux_sheets,
                 defect_threshold=defect_threshold,
+                rag_knowledge_text=rag_knowledge_text,
             )
         else:
             pop_c1, pop_c2 = st.columns([2.6, 1.4])
@@ -1372,6 +1396,7 @@ def render_advanced_extensions_hub(
                 active_filter_text=active_filter_text,
                 aux_sheets=aux_sheets,
                 defect_threshold=defect_threshold,
+                rag_knowledge_text=rag_knowledge_text,
                 key_suffix="inline",
                 chat_height=390,
             )
@@ -1404,8 +1429,7 @@ def render_advanced_extensions_hub(
             agent_app = build_agent_graph()
             q_bench = generate_smart_assistant_question(target_df, raw_df, active_filter_text, threshold=defect_threshold)
 
-            # [다이어트 적용] 반복 검증 시에도 토큰 초과를 막기 위해 최대 10건 요약 적용
-            compact_sample_str = _build_compact_sample_str(target_df, max_rows=10)
+            compact_sample_str = _build_compact_sample_str(target_df, max_rows=5)
 
             data_info_bench = (
                 f"[조회 조건]: {active_filter_text or '전체 데이터'}\n"
@@ -1416,6 +1440,10 @@ def render_advanced_extensions_hub(
                 f"[파이썬 정밀 집계표]\n{stat_summary_str}\n\n"
                 f"[대표 항목 참고용 요약 샘플]\n{compact_sample_str}"
             )
+
+            # RAG 데이터도 반복 검증에 동일하게 적용
+            if rag_knowledge_text:
+                data_info_bench += f"\n\n[사내 규정 및 참고 지식 (RAG)]\n{rag_knowledge_text}"
 
             bench_rows = []
             raw_reports = []
@@ -1563,8 +1591,8 @@ st.title("📊 자연어 기반 사내 데이터 분석 Agent")
 up_col1, up_col2 = st.columns([4, 1])
 with up_col1:
     uploaded_files = st.file_uploader(
-        "📂 사내 데이터·문서 파일(CSV, Excel, Word .docx, TXT) 업로드 (다중 첨부 · 확장자별 분류 · 동시 분석 지원)",
-        type=["csv", "xlsx", "docx", "txt"],
+        "📂 사내 데이터 분석용 엑셀/CSV 파일 업로드 (다중 첨부 · 동시 분석 지원)",
+        type=["csv", "xlsx"],
         accept_multiple_files=True,
         key=f"file_uploader_{st.session_state['uploader_key']}",
     )
@@ -1730,7 +1758,7 @@ with st.sidebar:
         )
 
     st.divider()
-    st.subheader("🎚️ 사내 품질 기준값 설정 (W47)")
+    st.subheader("🎚️ 사내 품질 기준값 설정")
     defect_threshold = st.slider(
         "사내 관리 기준값 / 임계치 (%)",
         min_value=0.5,
@@ -1745,6 +1773,22 @@ with st.sidebar:
     )
 
     st.divider()
+
+    # [RAG 지식 연동 UI 추가]
+    st.subheader("📚 사내 지식 문서 (RAG) 연동")
+    rag_files = st.file_uploader(
+        "리포트 작성 시 참고할 사내 규정서, 과거 회의록(Word .docx, TXT)을 올려주세요.",
+        type=["docx", "txt"],
+        accept_multiple_files=True,
+        key="rag_uploader"
+    )
+
+    rag_knowledge_text = ""
+    if rag_files:
+        rag_knowledge_text = extract_knowledge_text(rag_files)
+        st.success(f"✅ {len(rag_files)}개의 사내 지식 문서 내용 주입 대기 중")
+
+    st.divider()
     ollama_models = get_installed_ollama_models()
     with st.expander("🖥️ 로컬 Ollama 상세 설정 & 모델 안내 (클릭)", expanded=False):
         chosen_ollama = st.selectbox("구동할 로컬 모델 변경", options=ollama_models, index=0)
@@ -1757,7 +1801,7 @@ if not uploaded_files or len(raw_df) == 0:
         build_pipeline_status_html(has_file=False, has_query_df=False, saved_results={}),
         unsafe_allow_html=True,
     )
-    st.info("👆 분석할 사내 파일(.csv, .xlsx, .docx, .txt)을 업로드하면 1~5단계 실시간 파이프라인이 가동됩니다.")
+    st.info("👆 좌측 또는 상단에 분석할 사내 데이터를 업로드하면 1~5단계 실시간 파이프라인이 가동됩니다.")
 else:
     if aux_sheets:
         with st.expander(f"📎 보조 시트({', '.join(aux_sheets.keys())}) 원문 보기 (메인 집계 건수 오염 방지를 위해 자동 분리됨)", expanded=False):
@@ -1852,7 +1896,7 @@ else:
     render_visualization_fragment(target_df, aux_sheets, defect_threshold)
     st.divider()
     render_agent_analysis_section(
-        target_df, raw_df, summary_df, selected_models, active_filter_text, aux_sheets, defect_threshold, pipeline_slot
+        target_df, raw_df, summary_df, selected_models, active_filter_text, aux_sheets, defect_threshold, pipeline_slot, rag_knowledge_text
     )
     st.divider()
-    render_advanced_extensions_hub(target_df, raw_df, active_filter_text, aux_sheets, defect_threshold)
+    render_advanced_extensions_hub(target_df, raw_df, active_filter_text, aux_sheets, defect_threshold, rag_knowledge_text)
