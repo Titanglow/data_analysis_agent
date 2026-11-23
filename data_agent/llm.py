@@ -32,10 +32,9 @@ def get_installed_ollama_models() -> list[str]:
 
 def _get_active_groq_models(api_key: str) -> list[str]:
     """
-    Groq 서버에서 모델 목록을 조회하되, 퇴출(Decommissioned)된 모델을
-    피하기 위해 현재 가장 확실하게 지원하는 최신 모델 2개로만 강제 고정합니다.
+    Groq 서버에서 퇴출된 모델(llama3-70b-8192 등)을 제외하고
+    현재 가장 확실하고 빠른 최신 Llama 3 계열 모델 2개만 강제 고정합니다.
     """
-    # llama3-70b-8192 모델마저 서비스가 종료되었으므로 목록에서 완전히 제외합니다.
     return [
         "llama-3.3-70b-versatile",
         "llama-3.1-8b-instant"
@@ -88,7 +87,7 @@ def call_llm(prompt: str, mode: str = "local_ollama", knowledge_context: str = "
                         return header + txt.strip(), round(time.perf_counter() - t0, 2)
                 except Exception as e:
                     last_err = e
-                    # 에러 발생 시 즉시 다음 후보 모델로 넘깁니다. (퇴출 모델 에러 포함)
+                    # 에러 발생 시 즉시 다음 후보 모델로 매끄럽게 넘어감
                     continue
             return f"⚠️ Groq 무료 API 에러 (모델 퇴출 또는 토큰 한도 초과): 다시 시도해 주세요.\n({last_err})", round(time.perf_counter() - t0, 2)
         except Exception as e:
@@ -128,8 +127,7 @@ def call_llm(prompt: str, mode: str = "local_ollama", knowledge_context: str = "
                         return header + txt.strip(), round(time.perf_counter() - t0, 2)
                 except Exception as e:
                     last_err = e
-                    # [Gemini 서버 과부하 503 에러 방어]
-                    # 서버 혼잡 에러가 뜨면 1초 대기 후 다른 Gemini 모델로 재시도합니다.
+                    # 서버 혼잡 에러가 뜨면 1초 대기 후 다른 모델로 재시도
                     if "503" in str(e) or "UNAVAILABLE" in str(e):
                         time.sleep(1)
                         continue

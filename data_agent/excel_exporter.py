@@ -1,30 +1,122 @@
 # data_agent/excel_exporter.py
 import io
-import pandas as pd
-from openpyxl.drawing.image import Image as ExcelImage
-import plotly.io as pio
-import plotly.express as px
-from datetime import datetime
+import math
 import re
+from collections import Counter
+import pandas as pd
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
+from openpyxl.chart import BarChart, Reference
 from docx import Document
 from docx.shared import Inches, Pt, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.table import WD_TABLE_ALIGNMENT, WD_ALIGN_VERTICAL
 from docx.oxml import OxmlElement, parse_xml
 from docx.oxml.ns import nsdecls, qn
+from datetime import datetime
 
-from data_agent.config import (
-    DISTINCT_PALETTE,
-    DEFAULT_DEFECT_THRESHOLD,
-    MODEL_LABELS
-)
+from data_agent.config import DEFAULT_DEFECT_THRESHOLD, MODEL_LABELS
+
+# 불용어(Stopwords) 목록
+TOPIC_STOPWORDS = {
+    "조회", "확인", "이동", "검증", "테스트", "기능", "동작", "표시", "출력", "입력",
+    "선택", "클릭", "버튼", "화면", "상태", "경우", "정상", "여부", "시나리오", "항목",
+    "있음", "없음", "한다", "된다", "이다", "에서", "으로", "에게", "대한", "통해",
+    "후", "전", "시", "및", "등", "수", "값", "창", "란", "키", "키로", "다른", "이전",
+}
 
 
-def shorten_long_label(label: str, max_len: int = 35) -> str:
-    s = str(label)
-    if len(s) > max_len:
-        return s[:max_len] + "..."
-    return s
+def cluster_text_series_by_topic(series: pd.Series, max_groups: int = 8) -> pd.DataFrame:
+    """유사 문장/제목들을 공통 키워드 기반으로 그룹핑하여 통계표를 만듭니다."""
+    clean_vals = [
+        re.sub(r"\s*\[[^\]]+\]", "", str(v)).strip()
+        for v in series.dropna()
+        if str(v).strip() not in ("-", "", "None", "nan")
+    ]
+    total = len(clean_vals)
+    if total == 0:
+        return pd.DataFrame()
+
+    vc = pd.Series(clean_vals).value_counts()
+    if len(vc) <= max_groups and vc.iloc[0] > 1:
+        rows = []
+        for k, cnt in vc.items():
+            rows.append({
+                "주제/분류 그룹": str(k),
+                "건수": int(cnt),
+                "비중(%)": round(cnt / total * 100, 1),
+                "표시라벨": f"{cnt}건 ({cnt / total * 100:.1f}%)",
+                "포함된 상세 항목": str(k),
+            })
+        return pd.DataFrame(rows)
+
+    tokenized_list = []
+    word_counter = Counter()
+    for text in clean_vals:
+        words = re.findall(r"[가-힣A-Za-z0-9]{2,}", text)
+        filtered = []
+        for w in words:
+            w_stem = re.sub(r"(으로|에서|에게|부터|까지|이라|란|로|은|는|이|가|을|를|의|와|과|만|도)$", "", w)
+            if len(w_stem) >= 2 and w_stem.lower() not in TOPIC_STOPWORDS:
+                filtered.append(w_stem)
+        unique_in_row = list(dict.fromkeys(filtered))
+        tokenized_list.append((text, unique_in_row))
+        for uw in unique_in_row:
+            word_counter[uw] += 1
+
+    repeated_keywords = [w for w, c in word_counter.most_common(15) if c >= 2]
+
+    grouped_items = {}
+    for text, tokens in tokenized_list:
+        assigned_kw = None
+        for kw in repeated_keywords:
+            if kw in tokens or kw in text:
+                assigned_kw = f"📁 [{kw}] 관련 항목"
+                break
+        if assigned_kw is None:
+            first_word = tokens[0] if tokens else text[:10]
+            assigned_kw = f"📌 기타 ({first_word} 등)" if len(repeated_keywords) >= 2 else f"📄 {text[:18]}"
+        grouped_items.setdefault(assigned_kw, []).append(text)
+
+    sorted_groups = sorted(grouped_items.items(), key=lambda x: len(x[1]), reverse=True)
+    final_rows = []
+    etc_items = []
+
+    for idx, (g_name, items) in enumerate(sorted_groups):
+        if idx < max_groups - 1 or len(sorted_groups) <= max_groups:
+            cnt = len(items)
+            sample_preview = ", ".join(items[:4]) + (f" 외 {cnt - 4}건" if cnt > 4 else "")
+            final_rows.append({
+                "주제/분류 그룹": g_name,
+                "건수": cnt,
+                "비중(%)": round(cnt / total * 100, 1),
+                "표시라벨": f"{cnt}건 ({cnt / total * 100:.1f}%)",
+                "포함된 상세 항목": sample_preview,
+            })
+        else:
+            etc_items.extend(items)
+
+    if etc_items:
+        cnt = len(etc_items)
+        sample_preview = ", ".join(etc_items[:4]) + (f" 외 {cnt - 4}건" if cnt > 4 else "")
+        final_rows.append({
+            "주제/분류 그룹": "📌 기타 단건 시나리오 묶음",
+            "건수": cnt,
+            "비중(%)": round(cnt / total * 100, 1),
+            "표시라벨": f"{cnt}건 ({cnt / total * 100:.1f}%)",
+            "포함된 상세 항목": sample_preview,
+        })
+
+    return pd.DataFrame(final_rows)
+
+
+def shorten_long_label(text: str, max_len: int = 24) -> str:
+    s = re.sub(r"\s*\[[^\]]+\]", "", str(text)).strip()
+    s = re.sub(r"https?://[^\s/]+(?:/wiki/)?", "", s).strip()
+    s = re.sub(r"^PC 브라우저에서\s*", "", s).strip()
+    if len(s) <= max_len:
+        return s
+    return s[:max_len].rstrip() + "…"
 
 
 def is_manufacturing_df(df: pd.DataFrame) -> bool:
@@ -32,37 +124,77 @@ def is_manufacturing_df(df: pd.DataFrame) -> bool:
     return any(c in cols for c in ["생산량", "불량수"])
 
 
-def parse_report_into_sections(report_text: str) -> list[dict[str, str]]:
-    sections = [
-        {"구분 항목": "1. 전체 현황 및 요약", "키워드": ["전체 검증", "현황 및 요약", "전체 현황", "요약"]},
-        {"구분 항목": "2. 주요 분류·시나리오 분포", "키워드": ["실제 분류", "시나리오", "분류 컬럼별", "분포"]},
-        {"구분 항목": "3. 품질 리스크·원인 진단", "키워드": ["리스크", "취약 구간", "이상 징후", "이상치", "결함"]},
-        {"구분 항목": "4. 실무 조치 제안 (R&R)", "키워드": ["실무 조치", "조치 제안", "로드맵", "대책", "R&R"]}
-    ]
+def analyze_color_cell_contexts(df: pd.DataFrame) -> pd.DataFrame:
+    rows = []
+    if len(df) == 0:
+        return pd.DataFrame()
 
-    parsed_data = []
-    lines = report_text.splitlines()
-    current_sec = "요약 전 서론"
-    buffer = []
+    id_col = next((c for c in df.columns if c.upper() in ("ID", "TC ID", "TC_ID", "TC-ID", "번호", "라인", "설비번호")), df.columns[0])
+    status_col = next(
+        (c for c in df.columns if any(k in c.lower() for k in ["execution", "actual", "status", "result", "결과", "판정", "상태"])),
+        None,
+    )
 
-    for line in lines:
-        matched = False
-        for sec in sections:
-            if any(re.search(rf"(?:^|\s|\d\.?\s*\*?){kw}", line) for kw in sec["키워드"]) and len(line) < 60:
-                if buffer:
-                    parsed_data.append({"구분 항목": current_sec, "상세 분석 내용": "\n".join(buffer).strip()})
-                    buffer = []
-                current_sec = sec["구분 항목"]
-                matched = True
-                break
-        if not matched:
-            buffer.append(line)
+    for _, row in df.iterrows():
+        row_id = str(row.get(id_col, "-")).replace("[🎨빨강강조]", "").strip()
+        row_status = str(row.get(status_col, "-")).strip() if status_col else "-"
 
-    if buffer:
-        parsed_data.append({"구분 항목": current_sec, "상세 분석 내용": "\n".join(buffer).strip()})
+        for col in df.columns:
+            val_str = str(row[col])
+            color_match = re.search(r"\[(🎨[^\]]+|빈칸·🎨[^\]]+)\]", val_str)
+            if color_match:
+                color_tag = color_match.group(1)
+                clean_val = re.sub(r"\s*\[[^\]]+\]", "", val_str).strip() or "(빈칸)"
+                col_lower = col.lower()
 
-    filtered = [item for item in parsed_data if item["구분 항목"] != "요약 전 서론"]
-    return filtered if filtered else [{"구분 항목": "전체 리포트 원문", "상세 분석 내용": report_text.strip()}]
+                if any(k in col_lower for k in ["priority", "severity", "중요도", "심각도", "우선순위", "등급"]):
+                    meaning = f"중요도/심각도({clean_val}) 강조 표시"
+                elif any(k in col_lower for k in ["actual", "result", "status", "판정", "결과"]):
+                    if any(w in clean_val.lower() for w in ["fail", "ng", "불합격", "오류", "에러"]):
+                        meaning = "실행 결과 불합격(FAIL) 강조"
+                    elif "not run" in clean_val.lower() or "미실행" in clean_val.lower() or clean_val == "(빈칸)":
+                        meaning = "미실행(Not Run) 대기칸 강조"
+                    else:
+                        meaning = f"실행 결과({clean_val}) 상태 강조"
+                else:
+                    meaning = f"[{col}] 시각적 강조 표시"
+
+                rows.append({
+                    "식별 ID / 구분": row_id,
+                    "색상 표시된 컬럼(열)": col,
+                    "셀 실제 내용": clean_val[:40],
+                    "감지된 색상": color_tag,
+                    "자동 문맥 해석": meaning,
+                })
+
+    return pd.DataFrame(rows)
+
+
+def summarize_aux_sheets(aux_sheets: dict[str, pd.DataFrame] | None) -> pd.DataFrame:
+    if not aux_sheets:
+        return pd.DataFrame()
+
+    summary_rows = []
+    for s_name, s_df in aux_sheets.items():
+        if len(s_df) == 0:
+            continue
+        cols = list(s_df.columns)
+        for _, r in s_df.head(25).iterrows():
+            non_empty_vals = [
+                re.sub(r"\s*\[🎨[^\]]+\]", "", str(r[c])).strip()
+                for c in cols
+                if str(r[c]).strip() not in ("-", "", "None", "nan") and not str(r[c]).startswith("[빈칸")
+            ]
+            if not non_empty_vals:
+                continue
+            key_str = non_empty_vals[0]
+            val_str = " | ".join(non_empty_vals[1:]) if len(non_empty_vals) > 1 else "(단일 설명 항목)"
+            summary_rows.append({
+                "출처 시트명": s_name,
+                "구분 / 지표명": key_str[:50],
+                "상세 내용 및 설정값": val_str[:120],
+            })
+    return pd.DataFrame(summary_rows)
 
 
 def evaluate_threshold_verdict(df: pd.DataFrame, threshold: float = DEFAULT_DEFECT_THRESHOLD) -> str:
@@ -85,7 +217,6 @@ def evaluate_threshold_verdict(df: pd.DataFrame, threshold: float = DEFAULT_DEFE
             continue
 
         s_col = df[col].astype(str).str.strip().str.upper()
-
         empty_count = s_col.isin(["-", "", "NAN", "NONE", "(빈칸)", "N/A"]).sum() + s_col.str.startswith("[빈칸").sum()
         notrun_count = s_col.str.contains("NOT RUN|미실행").sum()
         fail_count = s_col.str.contains("FAIL|불합격|빨강|주의").sum()
@@ -105,290 +236,420 @@ def evaluate_threshold_verdict(df: pd.DataFrame, threshold: float = DEFAULT_DEFE
     return f"✅ [이상 없음 — 모든 항목 사내 기준({threshold}%) 충족] 미기입 및 주의 항목이 허용 범위 내에 있습니다."
 
 
-def analyze_color_cell_contexts(df: pd.DataFrame) -> pd.DataFrame:
-    rows = []
-    for idx, row in df.iterrows():
-        tc_id = row.get("ID", row.get("TC ID", idx))
-        for col in df.columns:
-            val = str(row[col])
-            if "🔴" in val or "빨강" in val:
-                rows.append({"ID": tc_id, "위치": col, "감지된 색상": "빨강 (FAIL/주의)", "셀 내용": val.replace("🔴", "").replace("[빨강]", "").strip()})
-            elif "🟢" in val or "초록" in val:
-                rows.append({"ID": tc_id, "위치": col, "감지된 색상": "초록 (PASS/정상)", "셀 내용": val.replace("🟢", "").replace("[초록]", "").strip()})
-            elif "🟡" in val or "노랑" in val:
-                rows.append({"ID": tc_id, "위치": col, "감지된 색상": "노랑 (경고/보류)", "셀 내용": val.replace("🟡", "").replace("[노랑]", "").strip()})
-            elif "🔵" in val or "파랑" in val:
-                rows.append({"ID": tc_id, "위치": col, "감지된 색상": "파랑 (참고)", "셀 내용": val.replace("🔵", "").replace("[파랑]", "").strip()})
-    return pd.DataFrame(rows)
-
-
-def build_korean_stat_tables(df: pd.DataFrame, aux_sheets: dict = None, threshold: float = DEFAULT_DEFECT_THRESHOLD) -> dict[str, pd.DataFrame]:
-    res = {}
-
-    # 1. 컬럼별 미기입/이상치 집계 및 해당 TC ID (Title 포함) 전수 명단
-    missing_data = []
-    total_len = len(df)
-
-    has_id = "ID" in df.columns
-    has_tc_id = "TC ID" in df.columns
-    has_title = "Title" in df.columns or "제목" in df.columns
-
-    for col in df.columns:
-        if str(col).lower() in ("_polarion", "id", "tc id", "번호", "시트명", "파일명"):
-            continue
-
-        s_col = df[col].astype(str).str.strip()
-        empty_mask = s_col.isin(["-", "", "nan", "None", "(빈칸)", "N/A"]) | s_col.str.startswith("[빈칸")
-        notrun_mask = s_col.str.contains("not run|미실행", case=False, na=False)
-        fail_mask = s_col.str.contains("fail|불합격|빨강|주의", case=False, na=False)
-
-        issue_mask = empty_mask | notrun_mask | fail_mask
-        issue_count = issue_mask.sum()
-
-        if issue_count > 0:
-            rate = (issue_count / total_len) * 100
-
-            issue_ids = []
-            for idx, is_issue in issue_mask.items():
-                if is_issue:
-                    row = df.loc[idx]
-                    id_val = row["ID"] if has_id else (row["TC ID"] if has_tc_id else f"Row_{idx + 1}")
-                    title_val = ""
-                    if has_title:
-                        title_col = "Title" if "Title" in df.columns else "제목"
-                        title_val = f" ({shorten_long_label(row[title_col], 12)})"
-                    issue_ids.append(f"{id_val}{title_val}")
-
-            id_list_str = ", ".join(issue_ids)
-            if len(id_list_str) > 300:
-                id_list_str = id_list_str[:295] + " ... (외 다수)"
-
-            status = "🚨 기준 초과" if rate > threshold else "✅ 양호"
-
-            missing_data.append({
-                "검증 컬럼명": col,
-                "미기입 및 이상 건수": f"{issue_count}건",
-                "비중(%)": f"{rate:.1f}%",
-                "사내 기준(%) 판정": status,
-                f"미기입(공란) 해당 TC ID 목록 (전체 {issue_count}건 명단)": id_list_str
-            })
-
-    if missing_data:
-        res["[필독] 컬럼별 미기입/이상치 집계 및 해당 TC ID 명단"] = pd.DataFrame(missing_data)
-    else:
-        res["[필독] 컬럼별 미기입/이상치 집계 및 해당 TC ID 명단"] = pd.DataFrame([{"진단 결과": f"전체 {total_len}건 중 미기입 및 이상치 0건 (모두 기준 이내로 정상)"}])
-
-    # 2. 유사 제목(Title) 시나리오 형태소 분석 및 그룹핑
-    title_col = next((c for c in df.columns if c.lower() in ("title", "제목", "테스트케이스명")), None)
-    if title_col:
-        titles = df[title_col].dropna().astype(str)
-        groups = {}
-        for t in titles:
-            t_clean = re.sub(r"\[.*?\]", "", t).strip()
-
-            # (MFC DD) 같은 접두사 추출
-            prefix_match = re.match(r"^\((.*?)\)", t_clean)
-            if prefix_match:
-                grp = f"({prefix_match.group(1)}) 모듈 시나리오"
-            else:
-                words = [w for w in re.split(r"[_\s\-]+", t_clean) if len(w) >= 2 and not w.isdigit()]
-                if words:
-                    grp = f"[{words[0]}] 관련 시나리오"
-                else:
-                    grp = "기타 일반 시나리오"
-
-            groups[grp] = groups.get(grp, 0) + 1
-
-        grp_data = [{"시나리오 그룹명 (유사 제목 묶음)": k, "해당 건수": f"{v}건", "비중(%)": f"{(v / total_len) * 100:.1f}%"}
-                    for k, v in sorted(groups.items(), key=lambda x: x[1], reverse=True)]
-        res["제목(Title) 기반 주요 테스트 시나리오 그룹핑 분포"] = pd.DataFrame(grp_data)
-
-    # 3. 주요 분류 열 TOP 5 분포
-    cat_cols = [c for c in ["Domain", "Sub System", "Category", "Priority", "Test Technique", "App", "Automated"] if c in df.columns]
-    if not cat_cols:
-        cat_cols = df.select_dtypes(include=["object", "category"]).columns.tolist()[:3]
-
-    dist_data = []
-    for col in cat_cols:
-        if str(col).lower() in ("_polarion", "id", "tc id", "번호", "시트명", "파일명", title_col.lower() if title_col else ""):
-            continue
-        val_counts = df[col].value_counts()
-        for val, cnt in val_counts.head(5).items():
-            if str(val).strip() and str(val).strip() != "-":
-                rate = (cnt / total_len) * 100
-                status = "🟢 주요 타겟" if rate > threshold else "⚪ 일반"
-                dist_data.append({
-                    "분류 항목(컬럼)": col,
-                    "세부 항목명": str(val),
-                    "분포 건수": f"{cnt}건",
-                    "비중(%)": f"{rate:.1f}%",
-                    "사내 기준 판정": status
-                })
-    if dist_data:
-        res["주요 카테고리별 상위 분포 현황"] = pd.DataFrame(dist_data)
-
-    return res
-
-
-def create_excel_chart(df: pd.DataFrame, title: str) -> bytes:
+def build_korean_stat_tables(df: pd.DataFrame, aux_sheets: dict[str, pd.DataFrame] | None = None, threshold: float = DEFAULT_DEFECT_THRESHOLD) -> dict[str, pd.DataFrame]:
+    tables = {}
     if len(df) == 0:
-        return None
+        return tables
+
+    all_cols = df.columns.tolist()
     num_cols = df.select_dtypes(include=["number"]).columns.tolist()
-    cat_cols = df.select_dtypes(include=["object", "category"]).columns.tolist()
+    total_cnt = len(df)
 
-    fig = None
-    if is_manufacturing_df(df) and "라인" in cat_cols and "불량수" in num_cols:
-        fig = px.bar(
-            df.groupby("라인", as_index=False)["불량수"].sum(),
-            x="라인", y="불량수", text_auto=True,
-            title=title, color_discrete_sequence=DISTINCT_PALETTE
-        )
-    elif cat_cols:
-        x_col = cat_cols[0]
-        agg_df = df.groupby(x_col, as_index=False).size().sort_values("size", ascending=False).head(10)
-        agg_df.columns = [x_col, "건수"]
-        fig = px.bar(
-            agg_df, x=x_col, y="건수", text_auto=True,
-            title=title, color_discrete_sequence=DISTINCT_PALETTE
-        )
+    aux_df = summarize_aux_sheets(aux_sheets)
+    if len(aux_df) > 0:
+        tables["1. 보조 시트 핵심 내용 요약"] = aux_df
 
-    if fig:
-        fig.update_layout(width=700, height=400)
-        return pio.to_image(fig, format="png", scale=2)
-    return None
+    col_status_rows = []
+    for col in all_cols:
+        series_str = df[col].astype(str).str.strip()
+        empty_cnt = int(series_str.isin(["-", "", "None", "nan", "N/A"]).sum())
+        filled_cnt = total_cnt - empty_cnt
+        fill_rate = (filled_cnt / total_cnt * 100) if total_cnt > 0 else 0.0
+        color_cnt = int(series_str.str.contains("배경|빨강|초록|노랑|주황|파랑", regex=True).sum())
+
+        valid_vals = series_str[~series_str.isin(["-", "", "None", "nan"])]
+        top_val = valid_vals.mode().iloc[0] if not valid_vals.empty else "-"
+        if len(str(top_val)) > 32:
+            top_val = str(top_val)[:32] + "..."
+
+        col_status_rows.append({
+            "컬럼(항목)명": col,
+            "전체 행 수": total_cnt,
+            "기재 완료(건)": filled_cnt,
+            "미기재/빈칸(건)": empty_cnt,
+            "데이터 작성률(%)": f"{fill_rate:.1f}%",
+            "색상강조 표시(건)": color_cnt,
+            "고유값 종류(종)": int(valid_vals.nunique()),
+            "최다 빈도 내용": top_val,
+        })
+    tables[f"{len(tables) + 1}. 전체 컬럼별 데이터 작성 현황 및 통계"] = pd.DataFrame(col_status_rows)
+
+    title_col = next((c for c in all_cols if any(k in c.lower() for k in ["title", "제목", "타이틀", "시나리오", "기능명", "항목명"])), None)
+    if title_col:
+        topic_df = cluster_text_series_by_topic(df[title_col], max_groups=10)
+        if len(topic_df) > 0:
+            tables[f"{len(tables) + 1}. [{title_col}] 유사 주제별 자동 그룹핑 집계"] = topic_df[
+                ["주제/분류 그룹", "건수", "비중(%)", "포함된 상세 항목"]
+            ]
+
+    color_ctx_df = analyze_color_cell_contexts(df)
+    if len(color_ctx_df) > 0:
+        tables[f"{len(tables) + 1}. 셀 배경색(강조 표시) 문맥 분석"] = color_ctx_df
+
+    cat_candidates = [
+        c for c in all_cols
+        if any(k in c.lower() for k in ["category", "priority", "severity", "precondition", "status", "actual", "불량유형", "시간대", "분류"])
+           and c != title_col
+    ]
+    for c_col in cat_candidates[:3]:
+        clean_s = df[c_col].astype(str).apply(lambda x: re.sub(r"\s*\[[^\]]+\]", "", x).strip())
+        if clean_s.nunique() > 12 and len(df) >= 10:
+            grp_df = cluster_text_series_by_topic(clean_s, max_groups=8)
+            if len(grp_df) > 0:
+                tables[f"{len(tables) + 1}. [{c_col}] 유형별 요약 집계"] = grp_df[
+                    ["주제/분류 그룹", "건수", "비중(%)", "포함된 상세 항목"]
+                ]
+        else:
+            vc = clean_s.value_counts()
+            c_rows = []
+            for val_name, cnt in vc.head(12).items():
+                share = (cnt / total_cnt * 100) if total_cnt > 0 else 0.0
+                c_rows.append({
+                    f"[{c_col}] 구분": val_name,
+                    "건수(건)": int(cnt),
+                    "비중(%)": f"{share:.1f}%",
+                })
+            if c_rows:
+                tables[f"{len(tables) + 1}. [{c_col}] 항목별 분포 집계"] = pd.DataFrame(c_rows)
+
+    if num_cols:
+        stat_rows = []
+        for col in num_cols:
+            s = df[col].dropna()
+            if len(s) == 0:
+                continue
+            stat_rows.append({
+                "수치 항목명": col,
+                "데이터 건수": int(len(s)),
+                "합계": round(float(s.sum()), 2),
+                "평균": round(float(s.mean()), 2),
+                "최솟값": round(float(s.min()), 2),
+                "중앙값(50%)": round(float(s.median()), 2),
+                "최댓값": round(float(s.max()), 2),
+            })
+        if stat_rows:
+            tables[f"{len(tables) + 1}. 수치 항목별 기초 통계 요약"] = pd.DataFrame(stat_rows)
+
+    return tables
+
+
+def _format_section_text_for_excel(text: str) -> str:
+    if not text or not text.strip():
+        return ""
+    cleaned = text.replace("**", "").replace("\r\n", "\n").replace("\r", "\n")
+    cleaned = re.sub(
+        r"(?:^|\n|\s+)(?:[-*•]\s*)?(즉시\s*조치|근본\s*대책|중장기\s*대책|기대\s*효과|설비\(Machine\)|작업자/교대\(Man\)|자재\(Material\)|공정조건\(Method\))",
+        r"\n▶ \1",
+        cleaned,
+    )
+    cleaned = re.sub(r"(?:^|\n|\s+)(?:[-*•]\s*)?(\[(?:생산|설비|품질|정량|개발|검증|QA|담당)[^\]]*\])", r"\n  • \1", cleaned)
+
+    formatted_lines = []
+    for raw_line in cleaned.splitlines():
+        line = raw_line.strip()
+        if not line or re.match(r"^[-*•▪▶\s]+$", line):
+            continue
+        if re.match(r"^\|?[\s\-:|]+\|?$", line):
+            continue
+        if line.startswith("|") and line.endswith("|"):
+            cells = [c.strip() for c in line.strip("|").split("|") if c.strip()]
+            if cells:
+                line = " ▪ " + " | ".join(cells)
+            else:
+                continue
+        elif line.startswith("- ") or line.startswith("* "):
+            body = line[2:].strip()
+            if not body:
+                continue
+            line = "• " + body
+        formatted_lines.append(line)
+    return "\n".join(formatted_lines).strip()
+
+
+def parse_report_into_sections(report_text: str) -> list[dict[str, str]]:
+    if not report_text or not report_text.strip():
+        return [{"구분 항목": "분석 리포트", "상세 분석 내용": "내용 없음"}]
+
+    cleaned_lines = []
+    model_info = ""
+    status_banner = ""
+
+    for raw_line in report_text.splitlines():
+        line = raw_line.strip()
+        if not line or re.match(r"^[-*•▪▶\s]+$", line):
+            continue
+        if line.startswith("*(연결 모델:") or line.startswith("*(로컬 모델:"):
+            model_info = line.strip("*() ")
+            continue
+        if "확인 필요" in line or "이상 없음" in line or "점검 안내" in line:
+            status_banner = line.lstrip("> ").replace("**", "")
+            continue
+        cleaned_lines.append(line)
+
+    sections = []
+    if model_info:
+        sections.append({"구분 항목": "구동 AI 엔진 상세", "상세 분석 내용": model_info})
+    if status_banner:
+        sections.append({"구분 항목": "자동 기준 판정 요약", "상세 분석 내용": status_banner})
+
+    current_title = "핵심 분석 요약"
+    current_body = []
+
+    for line in cleaned_lines:
+        header_match = re.match(r"^(?:#+\s*)?(\d+\.\s*.+)$", line)
+        if header_match:
+            if current_body:
+                formatted_body = _format_section_text_for_excel("\n".join(current_body))
+                if formatted_body:
+                    sections.append({"구분 항목": current_title, "상세 분석 내용": formatted_body})
+                current_body = []
+            current_title = header_match.group(1).replace("**", "").strip()
+        elif line.startswith("### "):
+            if current_body:
+                formatted_body = _format_section_text_for_excel("\n".join(current_body))
+                if formatted_body:
+                    sections.append({"구분 항목": current_title, "상세 분석 내용": formatted_body})
+                current_body = []
+            current_title = line.replace("### ", "").replace("**", "").strip()
+        else:
+            current_body.append(line)
+
+    if current_body:
+        formatted_body = _format_section_text_for_excel("\n".join(current_body))
+        if formatted_body:
+            sections.append({"구분 항목": current_title, "상세 분석 내용": formatted_body})
+    return sections
+
+
+def _style_worksheet(ws):
+    header_fill = PatternFill(start_color="059669", end_color="059669", fill_type="solid")
+    sub_title_fill = PatternFill(start_color="E6F4EA", end_color="E6F4EA", fill_type="solid")
+    key_col_fill = PatternFill(start_color="F9FAFB", end_color="F9FAFB", fill_type="solid")
+    alert_fill = PatternFill(start_color="FEF2F2", end_color="FEF2F2", fill_type="solid")
+    header_font = Font(name="맑은 고딕", size=10, bold=True, color="FFFFFF")
+    title_font = Font(name="맑은 고딕", size=11, bold=True, color="047857")
+    bold_body_font = Font(name="맑은 고딕", size=10, bold=True, color="111827")
+    body_font = Font(name="맑은 고딕", size=10, color="1F2937")
+    thin_border = Border(
+        left=Side(style="thin", color="D1D5DB"),
+        right=Side(style="thin", color="D1D5DB"),
+        top=Side(style="thin", color="D1D5DB"),
+        bottom=Side(style="thin", color="D1D5DB"),
+    )
+
+    col_widths = {}
+    for col in ws.columns:
+        max_len = 0
+        col_idx = col[0].column
+        col_letter = get_column_letter(col_idx)
+        for cell in col:
+            val = str(cell.value or "")
+            for line in val.splitlines():
+                char_len = sum(2 if ord(c) > 127 else 1 for c in line)
+                if char_len > max_len:
+                    max_len = char_len
+        width = max(min(max_len + 5, 65), 16)
+        ws.column_dimensions[col_letter].width = width
+        col_widths[col_idx] = width
+
+    for row in ws.iter_rows():
+        max_visual_lines = 1
+        for cell in row:
+            if cell.value is not None and str(cell.value).strip() != "":
+                val_str = str(cell.value)
+                c_width = max(col_widths.get(cell.column, 30) - 4, 20)
+
+                visual_lines = 0
+                for line in val_str.splitlines():
+                    line_char_len = sum(2 if ord(c) > 127 else 1 for c in line)
+                    visual_lines += max(1, math.ceil(line_char_len / c_width))
+                if visual_lines > max_visual_lines:
+                    max_visual_lines = visual_lines
+
+                if val_str.startswith("■"):
+                    cell.font = title_font
+                    cell.fill = sub_title_fill
+                    cell.alignment = Alignment(vertical="center", horizontal="left", wrap_text=True)
+                elif cell.row == 1 or (cell.offset(row=-1).value and str(cell.offset(row=-1).value).startswith("■")):
+                    cell.font = header_font
+                    cell.fill = header_fill
+                    cell.alignment = Alignment(vertical="center", horizontal="center", wrap_text=True)
+                    cell.border = thin_border
+                else:
+                    if cell.column == 1:
+                        cell.font = bold_body_font
+                        cell.fill = key_col_fill
+                        cell.alignment = Alignment(vertical="center", horizontal="left", wrap_text=True)
+                    else:
+                        cell.font = body_font
+                        cell.alignment = Alignment(vertical="top", horizontal="left", wrap_text=True)
+                        if "빨강" in val_str or "FAIL" in val_str:
+                            cell.fill = alert_fill
+                    cell.border = thin_border
+
+        if max_visual_lines > 1:
+            ws.row_dimensions[row[0].row].height = min(max_visual_lines * 19 + 12, 380)
+        else:
+            ws.row_dimensions[row[0].row].height = 26
+
+
+def _write_stat_tables_and_chart_to_sheet(
+        writer,
+        df: pd.DataFrame,
+        aux_sheets: dict[str, pd.DataFrame] | None = None,
+        sheet_name: str = "2_시트통합요약_및_핵심집계",
+):
+    tables = build_korean_stat_tables(df, aux_sheets=aux_sheets)
+    ws = writer.book.create_sheet(title=sheet_name)
+
+    current_row = 1
+    chart_target_coords = None
+
+    for title, t_df in tables.items():
+        ws.cell(row=current_row, column=1, value=f"■ {title}")
+        current_row += 1
+
+        header_row = current_row
+        for col_idx, col_name in enumerate(t_df.columns, start=1):
+            ws.cell(row=current_row, column=col_idx, value=col_name)
+        current_row += 1
+
+        for _, row_data in t_df.iterrows():
+            for col_idx, val in enumerate(row_data, start=1):
+                ws.cell(row=current_row, column=col_idx, value=val)
+            current_row += 1
+
+        end_row = current_row - 1
+        if any(k in title for k in ["그룹핑", "라인별", "분포", "판정"]) and chart_target_coords is None:
+            chart_target_coords = (header_row, end_row, title)
+
+        current_row += 2
+
+    _style_worksheet(ws)
+
+    if chart_target_coords is not None:
+        h_row, e_row, c_title = chart_target_coords
+        if e_row > h_row:
+            chart = BarChart()
+            chart.type = "col"
+            chart.style = 10
+            chart.title = f"[핵심 집계 차트] {c_title}"
+            chart.y_axis.title = "건수"
+            chart.x_axis.title = "그룹 / 항목"
+            chart.width = 16
+            chart.height = 10
+
+            val_col = 2
+            for c_idx in range(2, 6):
+                h_val = str(ws.cell(row=h_row, column=c_idx).value or "")
+                if any(k in h_val for k in ["불량수", "건수"]):
+                    val_col = c_idx
+                    break
+
+            data_ref = Reference(ws, min_col=val_col, min_row=h_row, max_row=e_row)
+            cats_ref = Reference(ws, min_col=1, min_row=h_row + 1, max_row=e_row)
+            chart.add_data(data_ref, titles_from_data=True)
+            chart.set_categories(cats_ref)
+            chart.legend = None
+            ws.add_chart(chart, "I2")
 
 
 def export_analysis_to_excel(
-        target_df: pd.DataFrame,
+        df: pd.DataFrame,
         summary_df: pd.DataFrame,
-        report: str,
-        elapsed: float,
-        model_name: str,
-        aux_sheets: dict = None,
+        report_text: str,
+        elapsed_time: float,
+        mode: str,
+        aux_sheets: dict[str, pd.DataFrame] | None = None,
         threshold: float = DEFAULT_DEFECT_THRESHOLD,
         analyzed_at: str = None
 ) -> bytes:
     output = io.BytesIO()
-    analyzed_at_str = analyzed_at or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    verdict = evaluate_threshold_verdict(target_df, threshold)
-
-    meta_df = pd.DataFrame([
-        {"항목": "분석 일시", "내용": analyzed_at_str},
-        {"항목": "AI 모델명", "내용": MODEL_LABELS.get(model_name, model_name)},
-        {"항목": "적용 사내 기준값(임계치)", "내용": f"{threshold}%"},
-        {"항목": "사내 기준 자동 판정", "내용": verdict},
-        {"항목": "분석 소요 시간", "내용": f"{elapsed} 초"},
-        {"항목": "분석 데이터 건수", "내용": f"{len(target_df):,} 건"},
-    ])
-
-    parsed_sections = parse_report_into_sections(report)
-    report_df = pd.DataFrame(parsed_sections)
-
-    # [수정] 2. 기초통계집계 시트 영어 번역
-    korean_summary_df = summary_df.copy()
-    korean_idx_map = {
-        "count": "데이터 건수",
-        "unique": "고유값 종류 수",
-        "top": "최다 빈도값(최빈값)",
-        "freq": "최빈값 등장 횟수",
-        "mean": "평균",
-        "std": "표준편차",
-        "min": "최소값",
-        "25%": "하위 25%",
-        "50%": "중앙값(50%)",
-        "75%": "상위 75%",
-        "max": "최대값"
-    }
-    korean_summary_df.index = [korean_idx_map.get(idx, idx) for idx in korean_summary_df.index]
-
-    kor_tables = build_korean_stat_tables(target_df, aux_sheets, threshold)
-    img_bytes = create_excel_chart(target_df, f"[{MODEL_LABELS.get(model_name, model_name)}] 주요 항목 건수 분포")
-
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        meta_df.to_excel(writer, sheet_name="1. 리포트 메타정보", index=False)
-        report_df.to_excel(writer, sheet_name="1. 리포트 본문", index=False)
-        korean_summary_df.to_excel(writer, sheet_name="2. 기초통계집계", index=True)
+        report_rows = [
+            {"구분 항목": "분석 AI 엔진", "상세 분석 내용": mode},
+            {"구분 항목": "총 소요 시간", "상세 분석 내용": f"{elapsed_time}초"},
+            {"구분 항목": "핵심 데이터 건수", "상세 분석 내용": f"총 {len(df)}건"},
+        ]
+        report_rows.extend(parse_report_into_sections(report_text))
 
-        # 3번 시트: 한국어 정밀 집계표 (여러 개를 아래로 이어서 붙임)
-        start_row = 0
-        for t_title, t_df in kor_tables.items():
-            pd.DataFrame([[f"■ {t_title}"]]).to_excel(writer, sheet_name="3. 한글 정밀통계표", index=False, header=False, startrow=start_row)
-            t_df.to_excel(writer, sheet_name="3. 한글 정밀통계표", index=False, startrow=start_row + 1)
-            start_row += len(t_df) + 3
+        pd.DataFrame(report_rows).to_excel(writer, index=False, sheet_name="1_AI분석리포트")
+        _style_worksheet(writer.sheets["1_AI분석리포트"])
 
-        target_df.to_excel(writer, sheet_name="4. 분석대상 원본데이터", index=False)
+        _write_stat_tables_and_chart_to_sheet(writer, df, aux_sheets=aux_sheets, sheet_name="2_시트통합요약_및_핵심집계")
 
-        if aux_sheets:
-            for s_name, s_df in aux_sheets.items():
-                clean_name = shorten_long_label(f"5. 원본_{s_name}", 30)
-                s_df.to_excel(writer, sheet_name=clean_name, index=False)
-
-        if img_bytes:
-            workbook = writer.book
-            ws_chart = workbook.create_sheet("6. 차트 시각화")
-            img = ExcelImage(io.BytesIO(img_bytes))
-            ws_chart.add_image(img, "B2")
+        df.to_excel(writer, index=False, sheet_name="3_핵심원본데이터")
+        _style_worksheet(writer.sheets["3_핵심원본데이터"])
 
     return output.getvalue()
 
 
 def export_combined_analysis_to_excel(
-        target_df: pd.DataFrame,
-        results_dict: dict,
-        model_labels: dict,
-        aux_sheets: dict = None,
+        df: pd.DataFrame,
+        saved_results: dict,
+        model_labels: dict[str, str],
+        aux_sheets: dict[str, pd.DataFrame] | None = None,
         threshold: float = DEFAULT_DEFECT_THRESHOLD
 ) -> bytes:
     output = io.BytesIO()
-
-    verdict = evaluate_threshold_verdict(target_df, threshold)
-
-    first_res = next(iter(results_dict.values()))
-    analyzed_at_str = first_res.get("analyzed_at") or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    meta_rows = [
-        {"비교 항목": "분석 일시", "내용": analyzed_at_str},
-        {"비교 항목": "분석 데이터 건수", "내용": f"{len(target_df):,} 건"},
-        {"비교 항목": "적용 사내 기준값(임계치)", "내용": f"{threshold}%"},
-        {"비교 항목": "사내 기준 자동 판정", "내용": verdict},
-    ]
-    for m_code, r_data in results_dict.items():
-        meta_rows.append({"비교 항목": f"[{model_labels.get(m_code, m_code)}] 소요 시간", "내용": f"{r_data['elapsed_time']}초"})
-
-    meta_df = pd.DataFrame(meta_rows)
-
-    combined_reports = []
-    for m_code, r_data in results_dict.items():
-        m_label = model_labels.get(m_code, m_code)
-        secs = parse_report_into_sections(r_data["report"])
-        for s in secs:
-            combined_reports.append({
-                "AI 모델": m_label,
-                "구분 항목": s["구분 항목"],
-                "상세 분석 내용": s["상세 분석 내용"]
-            })
-    combined_rep_df = pd.DataFrame(combined_reports)
-
-    kor_tables = build_korean_stat_tables(target_df, aux_sheets, threshold)
-    img_bytes = create_excel_chart(target_df, "전체 모델 공통 주요 항목 건수 분포")
-
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        meta_df.to_excel(writer, sheet_name="1. 다중모델 종합비교", index=False)
-        combined_rep_df.to_excel(writer, sheet_name="1. 리포트 본문 통합", index=False)
+        comp_rows = []
+        for m_code, res in saved_results.items():
+            sections = parse_report_into_sections(res.get("report", ""))
+            sec_map = {s["구분 항목"]: s["상세 분석 내용"] for s in sections}
 
-        start_row = 0
-        for t_title, t_df in kor_tables.items():
-            pd.DataFrame([[f"■ {t_title}"]]).to_excel(writer, sheet_name="2. 시트통합요약", index=False, header=False, startrow=start_row)
-            t_df.to_excel(writer, sheet_name="2. 시트통합요약", index=False, startrow=start_row + 1)
-            start_row += len(t_df) + 3
+            status_val = sec_map.get("자동 기준 판정 요약", "판정 완료")
+            trend_val = next((v for k, v in sec_map.items() if "1." in k or "추세" in k or "현황" in k), "")
+            anom_val = next((v for k, v in sec_map.items() if "2." in k or "이상" in k or "주의" in k or "색상" in k), "")
+            cause_val = next((v for k, v in sec_map.items() if "3." in k or "원인" in k or "가설" in k), "")
+            action_val = next((v for k, v in sec_map.items() if "4." in k or "조치" in k), "")
 
-        target_df.to_excel(writer, sheet_name="3. 분석대상 원본데이터", index=False)
+            comp_rows.append({
+                "AI 모델명": model_labels.get(m_code, m_code),
+                "소요 시간(초)": float(res.get("elapsed_time", 0.0)),
+                "자동 판정 요약": _format_section_text_for_excel(status_val),
+                "1. 시트 종합 현황 및 추세": _format_section_text_for_excel(trend_val) or "개별 시트 참조",
+                "2. 주요 이상·강조 항목 해석": _format_section_text_for_excel(anom_val) or "개별 시트 참조",
+                "3. 데이터 근거 원인 가설": _format_section_text_for_excel(cause_val) or "개별 시트 참조",
+                "4. 실무 조치 제안": _format_section_text_for_excel(action_val) or "개별 시트 참조",
+            })
 
-        if img_bytes:
-            workbook = writer.book
-            ws_chart = workbook.create_sheet("4. 통합 차트 시각화")
-            img = ExcelImage(io.BytesIO(img_bytes))
-            ws_chart.add_image(img, "B2")
+        comp_df = pd.DataFrame(comp_rows)
+        comp_df.to_excel(writer, index=False, sheet_name="1_모델별_종합비교")
+        ws_comp = writer.sheets["1_모델별_종합비교"]
+        _style_worksheet(ws_comp)
+
+        if len(comp_rows) >= 1:
+            speed_chart = BarChart()
+            speed_chart.type = "col"
+            speed_chart.style = 11
+            speed_chart.title = "AI 모델별 분석 소요 시간(초) 비교"
+            speed_chart.y_axis.title = "소요 시간(초)"
+            speed_chart.x_axis.title = "AI 모델"
+            speed_chart.width = 15
+            speed_chart.height = 9
+
+            data_ref = Reference(ws_comp, min_col=2, min_row=1, max_row=len(comp_rows) + 1)
+            cats_ref = Reference(ws_comp, min_col=1, min_row=2, max_row=len(comp_rows) + 1)
+            speed_chart.add_data(data_ref, titles_from_data=True)
+            speed_chart.set_categories(cats_ref)
+            speed_chart.legend = None
+            ws_comp.add_chart(speed_chart, "I2")
+
+        _write_stat_tables_and_chart_to_sheet(writer, df, aux_sheets=aux_sheets, sheet_name="2_시트통합요약_및_핵심집계")
+
+        df.to_excel(writer, index=False, sheet_name="3_핵심원본데이터")
+        _style_worksheet(writer.sheets["3_핵심원본데이터"])
+
+        for m_code, res in saved_results.items():
+            safe_sheet = f"리포트_{m_code}"[:31]
+            m_rows = [
+                {"구분 항목": "AI 모델명", "상세 분석 내용": model_labels.get(m_code, m_code)},
+                {"구분 항목": "소요 시간", "상세 분석 내용": f"{res.get('elapsed_time', 0.0)}초"},
+            ]
+            m_rows.extend(parse_report_into_sections(res.get("report", "")))
+            pd.DataFrame(m_rows).to_excel(writer, index=False, sheet_name=safe_sheet)
+            _style_worksheet(writer.sheets[safe_sheet])
 
     return output.getvalue()
 
@@ -485,7 +746,6 @@ def export_analysis_to_docx(
         analyzed_at: str = None
 ) -> bytes:
     doc = Document()
-
     for section in doc.sections:
         section.page_width = Inches(8.27)
         section.page_height = Inches(11.69)
@@ -564,12 +824,9 @@ def export_analysis_to_docx(
             p_body.paragraph_format.space_after = Pt(4)
             p_body.paragraph_format.line_spacing = 1.3
 
-            is_bullet = False
             if line.startswith("-") or line.startswith("*"):
-                is_bullet = True
                 line = line[1:].strip()
                 p_body.paragraph_format.left_indent = Inches(0.2)
-
                 r_bul = p_body.add_run("• ")
                 r_bul.font.color.rgb = RGBColor(0x05, 0x96, 0x69)
                 r_bul.font.bold = True
@@ -596,7 +853,6 @@ def export_combined_analysis_to_docx(
         threshold: float = DEFAULT_DEFECT_THRESHOLD
 ) -> bytes:
     doc = Document()
-
     for section in doc.sections:
         section.page_width = Inches(8.27)
         section.page_height = Inches(11.69)
@@ -702,12 +958,9 @@ def export_combined_analysis_to_docx(
                 p_body.paragraph_format.space_after = Pt(3)
                 p_body.paragraph_format.line_spacing = 1.2
 
-                is_bullet = False
                 if line.startswith("-") or line.startswith("*"):
-                    is_bullet = True
                     line = line[1:].strip()
                     p_body.paragraph_format.left_indent = Inches(0.2)
-
                     r_bul = p_body.add_run("• ")
                     r_bul.font.color.rgb = RGBColor(0x05, 0x96, 0x69)
                     r_bul.font.bold = True
