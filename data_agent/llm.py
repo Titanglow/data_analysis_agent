@@ -32,16 +32,14 @@ def get_installed_ollama_models() -> list[str]:
 
 def _get_active_groq_models(api_key: str) -> list[str]:
     """
-    Groq 서버에서 모델 목록을 조회하되, 불안정한 모델로 넘어가지 않도록
-    가장 성능이 좋고 토큰 한도가 넉넉한 Llama3 계열로만 강제 고정합니다.
+    Groq 서버에서 모델 목록을 조회하되, 퇴출(Decommissioned)된 모델을
+    피하기 위해 현재 가장 확실하게 지원하는 최신 모델 2개로만 강제 고정합니다.
     """
-    preferred = [
+    # llama3-70b-8192 모델마저 서비스가 종료되었으므로 목록에서 완전히 제외합니다.
+    return [
         "llama-3.3-70b-versatile",
-        "llama-3.1-8b-instant",
-        "llama3-70b-8192",
+        "llama-3.1-8b-instant"
     ]
-    # 이전처럼 avail 목록의 다른 엉뚱한 모델(gpt-oss 등)을 append 하지 않고 오직 preferred만 반환합니다.
-    return preferred
 
 
 def call_llm(prompt: str, mode: str = "local_ollama", knowledge_context: str = "") -> tuple[str, float]:
@@ -71,7 +69,6 @@ def call_llm(prompt: str, mode: str = "local_ollama", knowledge_context: str = "
             candidates = _get_active_groq_models(api_key)
             last_err = None
 
-            # 토큰 방어선 (약 10,000자로 강제 컷팅)
             safe_prompt = prompt if len(prompt) < 10000 else prompt[:10000] + "\n\n...[데이터 생략]"
 
             for m_name in candidates:
@@ -83,7 +80,6 @@ def call_llm(prompt: str, mode: str = "local_ollama", knowledge_context: str = "
                             {"role": "user", "content": safe_prompt},
                         ],
                         temperature=0.2,
-                        # 리포트 중간 끊김 방지를 위해 900 -> 1200 토큰으로 상향 (OTPM 429 에러 한계선 이내)
                         max_tokens=1200,
                     )
                     txt = resp.choices[0].message.content or ""
@@ -92,9 +88,9 @@ def call_llm(prompt: str, mode: str = "local_ollama", knowledge_context: str = "
                         return header + txt.strip(), round(time.perf_counter() - t0, 2)
                 except Exception as e:
                     last_err = e
-                    if any(err_code in str(e) for err_code in ["413", "429"]):
-                        continue  # 토큰 초과 시 다음 후보(Llama 8b 등)로 조용히 넘김
-            return f"⚠️ Groq 무료 API 토큰 한도 초과: 검색 조건을 좁히거나 1분 뒤에 다시 시도해 주세요.\n({last_err})", round(time.perf_counter() - t0, 2)
+                    # 에러 발생 시 즉시 다음 후보 모델로 넘깁니다. (퇴출 모델 에러 포함)
+                    continue
+            return f"⚠️ Groq 무료 API 에러 (모델 퇴출 또는 토큰 한도 초과): 다시 시도해 주세요.\n({last_err})", round(time.perf_counter() - t0, 2)
         except Exception as e:
             return f"⚠️ Groq 초기화 오류: {e}", round(time.perf_counter() - t0, 2)
 
@@ -132,11 +128,13 @@ def call_llm(prompt: str, mode: str = "local_ollama", knowledge_context: str = "
                         return header + txt.strip(), round(time.perf_counter() - t0, 2)
                 except Exception as e:
                     last_err = e
-                    # 구글 서버 503 과부하 에러 시 친절한 안내 메시지로 변경
+                    # [Gemini 서버 과부하 503 에러 방어]
+                    # 서버 혼잡 에러가 뜨면 1초 대기 후 다른 Gemini 모델로 재시도합니다.
                     if "503" in str(e) or "UNAVAILABLE" in str(e):
-                        return f"⚠️ Google Gemini 서버가 현재 일시적으로 혼잡합니다 (503 에러). 잠시 후 다시 시도해 주세요.", round(time.perf_counter() - t0, 2)
+                        time.sleep(1)
+                        continue
                     continue
-            return f"⚠️ Gemini API 호출 오류: {last_err}", round(time.perf_counter() - t0, 2)
+            return f"⚠️ Google Gemini 무료 API 서버가 현재 혼잡(503 과부하)하여 모든 재시도에 실패했습니다. 1분 뒤에 다시 분석을 눌러주세요.", round(time.perf_counter() - t0, 2)
         except Exception as e:
             return f"⚠️ Gemini 초기화 오류: {e}", round(time.perf_counter() - t0, 2)
 

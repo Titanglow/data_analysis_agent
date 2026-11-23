@@ -39,7 +39,7 @@ from data_agent.tools.data_loader import (
     filter_by_keywords,
     run_sql_query,
     export_db_to_sql_script,
-    extract_knowledge_text,  # RAG 지식 추출 함수 Import 추가
+    extract_knowledge_text,
     DB_PATH,
     TABLE_NAME,
 )
@@ -61,6 +61,8 @@ if "saved_results" not in st.session_state:
     st.session_state["saved_results"] = {}
 if "last_analyzed_df" not in st.session_state:
     st.session_state["last_analyzed_df"] = None
+if "last_summary_df" not in st.session_state:
+    st.session_state["last_summary_df"] = None
 if "last_aux_sheets" not in st.session_state:
     st.session_state["last_aux_sheets"] = {}
 if "pipeline_logs" not in st.session_state:
@@ -110,7 +112,6 @@ st.markdown(
         border-color: #047857 !important;
     }}
 
-    /* 🗗 배경 스크롤(1·2·3번 확인)을 절대 막지 않는 우측 고정 플로팅 팝업 채팅창 스타일 */
     div[data-testid="stVerticalBlock"]:has(#floating-chat-marker):not(:has(div[data-testid="stVerticalBlock"] #floating-chat-marker)) {{
         position: fixed !important;
         bottom: 22px !important;
@@ -135,15 +136,12 @@ st.markdown(
 def _build_compact_sample_str(df: pd.DataFrame, max_rows: int = 5) -> str:
     if df is None or len(df) == 0:
         return "데이터 없음"
-
     important_cols = [c for c in df.columns if any(k in str(c).lower() for k in ["id", "title", "procedure", "result", "status", "priority", "domain", "라인", "생산", "불량"])]
     if not important_cols:
         important_cols = list(df.columns[:10])
-
     sub = df[important_cols].head(max_rows).copy()
     for c in sub.columns:
         sub[c] = sub[c].apply(lambda x: shorten_long_label(str(x).replace("\n", " "), 20))
-
     return sub.to_string(index=False)
 
 
@@ -151,6 +149,7 @@ def reset_all_inputs_and_files():
     st.session_state["uploader_key"] += 1
     st.session_state["saved_results"] = {}
     st.session_state["last_analyzed_df"] = None
+    st.session_state["last_summary_df"] = None
     st.session_state["last_aux_sheets"] = {}
     st.session_state["pipeline_logs"] = []
     st.session_state["current_file_sig"] = ""
@@ -291,6 +290,10 @@ def _detect_mentioned_columns(query_str: str, df_columns: list) -> list:
 
 
 def build_smart_sql(nl_query: str, df: pd.DataFrame, table_name: str) -> str:
+    """
+    자연어를 SQL로 변환하는 함수.
+    [수정] 동일한 열(예: 라인)에 대한 여러 검색어(A라인, B라인)가 들어오면 무조건 OR로 묶도록 로직 수정.
+    """
     if not nl_query or not nl_query.strip():
         return f"SELECT * FROM {table_name};"
 
@@ -332,14 +335,6 @@ def build_smart_sql(nl_query: str, df: pd.DataFrame, table_name: str) -> str:
         sql = f"SELECT * FROM {table_name}{order_clause}"
         return f"{sql} LIMIT {limit_val};" if limit_val else f"{sql};"
 
-    if any(k in q_without_limit for k in ["빨강", "빨간", "초록", "노랑", "배경", "색상", "색깔"]):
-        color_kw = "빨강" if ("빨강" in q_without_limit or "빨간" in q_without_limit) else (
-            "초록" if "초록" in q_without_limit else ("노랑" if "노랑" in q_without_limit else "강조")
-        )
-        or_likes = [f'"{col}" LIKE \'%{color_kw}%\'' for col in df.columns]
-        sql = f"SELECT * FROM {table_name} WHERE (" + " OR ".join(or_likes) + f"){order_clause}"
-        return f"{sql} LIMIT {limit_val};" if limit_val else f"{sql};"
-
     if any(k in q_without_limit.lower() for k in ["미기입", "미기재", "빈칸", "공란", "누락", "미실행", "not run", "n/a"]):
         mentioned_cols = _detect_mentioned_columns(q_without_limit, list(df.columns))
         check_cols = mentioned_cols if mentioned_cols else [
@@ -355,9 +350,9 @@ def build_smart_sql(nl_query: str, df: pd.DataFrame, table_name: str) -> str:
         return f"{sql} LIMIT {limit_val};" if limit_val else f"{sql};"
 
     is_negation = any(k in q_without_limit for k in ["빼고", "제외", "아닌", "말고"])
-
     col_matches: dict[str, list[str]] = {}
     str_cols = df.select_dtypes(include=["object", "category"]).columns.tolist()
+
     for col in str_cols:
         matched_vals = []
         for val in df[col].dropna().astype(str).unique():
@@ -370,12 +365,11 @@ def build_smart_sql(nl_query: str, df: pd.DataFrame, table_name: str) -> str:
             col_matches[col] = list(dict.fromkeys(matched_vals))
 
     where_clauses = []
+    # [수정] 같은 컬럼 내 여러 매칭값이 있으면 무조건 OR 조건으로 묶음
     for col, vals in col_matches.items():
         if is_negation:
             and_not = " AND ".join(f'"{col}" NOT LIKE \'%{v}%\'' for v in vals)
             where_clauses.append(f"({and_not})")
-        elif len(vals) == 1:
-            where_clauses.append(f'"{col}" LIKE \'%{vals[0]}%\'')
         else:
             or_part = " OR ".join(f'"{col}" LIKE \'%{v}%\'' for v in vals)
             where_clauses.append(f"({or_part})")
@@ -389,14 +383,9 @@ def build_smart_sql(nl_query: str, df: pd.DataFrame, table_name: str) -> str:
                 if ("불량" in q_without_limit and "불량" in str(col)) or ("생산" in q_without_limit and "생산" in str(col)) or ("가동" in q_without_limit and "가동" in str(col)):
                     target_col = col
                     break
-            if target_col is None:
-                for col in num_cols:
-                    s_num = df[col].dropna()
-                    if len(s_num) > 0 and float(s_num.min()) <= target_num <= float(s_num.max()):
-                        target_col = col
-                        break
         if target_col:
             num_str = nums[0]
+            op = "="
             if any(k in q_without_limit for k in ["넘", "초과", "보다 큰", "많은", "높은", ">"]):
                 op = ">=" if "이상" in q_without_limit else ">"
             elif any(k in q_without_limit for k in ["이상", "부터", ">="]):
@@ -405,43 +394,12 @@ def build_smart_sql(nl_query: str, df: pd.DataFrame, table_name: str) -> str:
                 op = "<"
             elif any(k in q_without_limit for k in ["이하", "이내", "까지", "<="]):
                 op = "<="
-            else:
-                op = "="
             where_clauses.append(f'"{target_col}" {op} {num_str}')
-
-    if not where_clauses and str_cols:
-        stop_words = {
-            "전체", "조회", "해줘", "보여줘", "찾아줘", "검색", "데이터", "항목", "행", "열", "에서", "만",
-            "그리고", "또는", "이나", "이랑", "랑", "과", "와", "포함", "있는", "없는", "제외", "빼고", "아닌", "말고",
-            "높은", "낮은", "많은", "적은", "순", "정렬", "이상", "이하", "초과", "미만", "표로", "목록", "뽑아줘",
-            "요약", "분석", "보고서", "현재", "핵심", "현황",
-        }
-        raw_tokens = re.findall(r"[A-Za-z0-9_.+-]{2,}|[가-힣]{2,}", q_without_limit)
-        search_kws = []
-        for tk in raw_tokens:
-            tk_clean = re.sub(r"(이랑|으로|에서|부터|까지|만|은|는|이|가|을|를|랑|도)$", "", tk).strip()
-            if len(tk_clean) >= 2 and tk_clean.lower() not in stop_words and not tk_clean.isdigit():
-                if tk_clean.lower() not in [str(c).lower() for c in df.columns]:
-                    search_kws.append(tk_clean)
-
-        for kw in list(dict.fromkeys(search_kws))[:3]:
-            hit_cols = [
-                col for col in str_cols
-                if df[col].astype(str).str.contains(re.escape(kw), case=False, na=False).any()
-            ]
-            if hit_cols:
-                if is_negation:
-                    where_clauses.append("(" + " AND ".join(f'"{c}" NOT LIKE \'%{kw}%\'' for c in hit_cols) + ")")
-                else:
-                    where_clauses.append("(" + " OR ".join(f'"{c}" LIKE \'%{kw}%\'' for c in hit_cols) + ")")
 
     sql = f"SELECT * FROM {table_name}"
     if where_clauses:
-        join_op = " AND " if is_negation or len(where_clauses) == 1 else " OR "
-        if col_matches or nums:
-            sql += " WHERE " + " AND ".join(where_clauses)
-        else:
-            sql += " WHERE " + join_op.join(where_clauses)
+        # 컬럼 간 결합은 AND 처리 (A라인 '이면서' 불량수 20 이상)
+        sql += " WHERE " + " AND ".join(where_clauses)
     sql += order_clause
     if limit_val is not None:
         sql += f" LIMIT {limit_val}"
@@ -455,25 +413,14 @@ def generate_smart_assistant_question(
         user_filter_text: str,
         threshold: float = DEFAULT_DEFECT_THRESHOLD,
 ) -> str:
-    if len(target_df) == 0:
-        return "현재 데이터의 핵심 현황, 이상·주의 항목, 원인 가설 및 실무 조치 제안을 정리해 줘."
-
-    all_cols = target_df.columns.tolist()
-    cols_lower = " ".join(str(c).lower() for c in all_cols)
-    scope_parts = []
+    """[수정] 1번 창에서 자연어로 검색한 조건(user_filter_text)을 AI 비서의 질문 문장에 명확하게 융합합니다."""
+    scope_title = ""
     if user_filter_text and user_filter_text.strip():
-        scope_parts.append(f"검색조건('{user_filter_text.strip()}')")
+        scope_title = f"검색 조건 [{user_filter_text.strip()}] (총 {len(target_df):,}건)"
+    else:
+        scope_title = f"전체 조회 데이터 (총 {len(target_df):,}건)"
 
-    if "파일명" in all_cols:
-        files = target_df["파일명"].unique().tolist()
-        scope_parts.append(f"통합 파일 {len(files)}개({', '.join(map(str, files[:3]))})")
-    if "시트명" in all_cols:
-        sheets = target_df["시트명"].unique().tolist()
-        scope_parts.append(f"대상 시트 {len(sheets)}개({', '.join(map(str, sheets[:3]))})")
-
-    stat_snippets = [f"총 {len(target_df):,}건", f"사내 기준 {threshold}% 적용"]
-    scope_title = " · ".join(scope_parts) if scope_parts else "전체 조회 데이터"
-
+    stat_snippets = [f"사내 기준 {threshold}% 적용"]
     if is_manufacturing_df(target_df):
         p_sum = int(target_df["생산량"].sum())
         d_sum = int(target_df["불량수"].sum())
@@ -481,37 +428,15 @@ def generate_smart_assistant_question(
         stat_snippets.append(f"총 생산량 {p_sum:,}개, 총 불량수 {d_sum:,}개(불량률 {rate:.2f}%)")
         stat_str = ", ".join(stat_snippets)
         return (
-            f"[AI 비서 자동 맞춤 질문] {scope_title} ({stat_str}) 데이터를 바탕으로 "
+            f"{scope_title} 데이터를 바탕으로 "
             f"① 라인·일자별 핵심 추세 및 불량 비중(%), ② 사내 허용 기준({threshold}%) 초과 이상 구간, "
-            f"③ 공정·설비·작업 관점 원인 가설, ④ 담당 부서별 즉시 조치(24h) 및 근본 대책(1개월)을 정밀 분석해 줘."
+            f"③ 공정·설비·작업 관점 원인 가설, ④ 담당 부서별 조치 제안을 정밀 분석해 줘."
         )
 
-    color_df = analyze_color_cell_contexts(target_df)
-    color_cnt = len(color_df)
-
-    if any(k in cols_lower for k in ["procedure", "pass/fail", "actual", "precondition", "pre-condition", "domain", "sub system", "priority", "category", "tc"]):
-        if color_cnt > 0:
-            stat_snippets.append(f"🎨셀 색상강조 {color_cnt}건 감지")
-        actual_cat_cols = [c for c in ["Category", "Priority", "Test Technique", "Domain", "Sub System", "App", "Automated", "Execution Status"] if c in all_cols]
-        for c_cand in actual_cat_cols[:3]:
-            vals = [str(v) for v in target_df[c_cand].unique().tolist() if str(v) != "-"]
-            if vals:
-                stat_snippets.append(f"{c_cand}[{', '.join(vals[:3])}]")
-        stat_str = ", ".join(stat_snippets)
-        col_list_str = ", ".join(actual_cat_cols[:4]) if actual_cat_cols else "주요 분류 열"
-        return (
-            f"[AI 비서 자동 맞춤 질문] {scope_title} ({stat_str}) 데이터를 바탕으로 "
-            f"① 실제 존재하는 분류 열({col_list_str})별 건수·비중(%) 및 사내 기준({threshold}%) 이상 항목, "
-            f"② 유사 시나리오 키워드 묶음 분포, "
-            f"③ 미기입률 사내 기준({threshold}%) 초과 컬럼(해당 TC ID 포함) 및 실행 상태 점검, "
-            f"④ QA·개발팀의 즉시 조치(24h) 및 검증 표준화 대책(1개월)을 원본 샘플 나열 없이 1~4번 목차로만 깔끔하게 분석해 줘."
-        )
-
-    stat_str = ", ".join(stat_snippets)
     return (
-        f"[AI 비서 자동 맞춤 질문] {scope_title} ({stat_str}) 데이터를 바탕으로 "
+        f"{scope_title} 데이터를 바탕으로 "
         f"① 실제 항목별 핵심 현황 및 사내 기준({threshold}%) 비교, "
-        f"② 주요 리스크 및 원인 가설, ③ 실무 조치 제안(24h/1개월)을 정리해 줘."
+        f"② 주요 리스크 및 원인 진단, ③ 실무 조치 제안(24h/1개월)을 정리해 줘."
     )
 
 
@@ -566,14 +491,13 @@ def render_related_links_box(target_df: pd.DataFrame):
                     st.markdown(f"- 🔗 [{item['title']}]({item['link']}) `{item['date']}`")
             else:
                 st.caption("우측 포털 원클릭 검색 링크를 이용해 주세요.")
-
         with c_ref:
             q_enc = urllib.parse.quote(custom_kw)
             st.markdown("**📚 전문 기술 자료 & 포털 원클릭 검색**")
             st.markdown(
                 f"- 🟢 [네이버 뉴스: '{custom_kw}' 검색](https://search.naver.com/search.naver?where=news&query={q_enc})\n"
                 f"- 🔵 [구글 뉴스: '{custom_kw}' 검색](https://news.google.com/search?q={q_enc}&hl=ko&gl=KR)\n"
-                f"- 📑 [Google 학술/기술논문(Scholar) 검색](https://scholar.google.co.kr/scholar?q={q_enc})"
+                f"- 📑 [Google 학술논문(Scholar) 검색](https://scholar.google.co.kr/scholar?q={q_enc})"
             )
 
 
@@ -660,7 +584,7 @@ def _execute_chat_turn(
         stat_summary_str: str,
         verdict_now: str,
         defect_threshold: float,
-        rag_knowledge_text: str,  # RAG 지식 추가
+        rag_knowledge_text: str,
 ):
     st.session_state["chat_history"].append({"role": "user", "content": user_q})
 
@@ -703,7 +627,6 @@ def _execute_chat_turn(
 [사용자 채팅 질문]
 {user_q}
 """
-    # RAG 지식을 함께 넘겨줌
     ans_text, ans_el = call_llm(chat_prompt, mode=chat_model, knowledge_context=rag_knowledge_text)
     model_short = MODEL_LABELS.get(chat_model, chat_model).split("(")[0].strip()
 
@@ -1010,7 +933,7 @@ def show_model_visual_popup(m_code: str, res_data: dict, target_df: pd.DataFrame
     p_c1, p_c2 = st.columns(2)
     with p_c1:
         st.download_button(
-            label=f"📥 {m_code} 엑셀 리포트 다운로드 (.xlsx)",
+            label=f"📥 {m_code} 개별 리포트 다운로드 (.xlsx)",
             data=res_data["excel_bytes"],
             file_name=f"report_{m_code}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -1101,7 +1024,7 @@ def render_agent_analysis_section(
         aux_sheets: dict[str, pd.DataFrame],
         defect_threshold: float,
         pipeline_slot,
-        rag_knowledge_text: str,  # RAG 추가
+        rag_knowledge_text: str,
 ):
     st.subheader("3️⃣ AI 비서 맞춤 질문 & 에이전트 동시 비교 분석 (Groq vs Gemini vs Ollama 정밀 모드)")
 
@@ -1112,26 +1035,25 @@ def render_agent_analysis_section(
     q_mode = st.radio(
         "🤖 질문 생성 방식 선택",
         options=[
-            "🤖 AI 비서 자동 맞춤 질문 (조회된 시트·실제 컬럼·사내 기준값 자동 조합)",
+            "🤖 AI 비서 자동 맞춤 질문 (1번 조회 조건과 100% 자동 연동됨)",
             "✍️ 사용자 직접 질문 입력/수정",
         ],
         horizontal=True,
     )
 
     if q_mode.startswith("🤖"):
-        st.info(f"**💡 AI 비서가 현재 조회된 데이터({len(target_df):,}건, 기준 {defect_threshold}%)에 맞춰 조합한 분석 질문입니다:**\n\n{auto_assistant_q}")
+        st.info(f"**💡 AI 비서가 1번 자연어 조회 조건(`{active_filter_text or '전체 조회'}`)과 데이터({len(target_df):,}건, 기준 {defect_threshold}%)를 융합하여 만든 분석 질문입니다:**\n\n{auto_assistant_q}")
         question = auto_assistant_q
     else:
-        question = st.text_input("💡 에이전트에게 지시할 분석 질문을 입력하세요:", value=auto_assistant_q)
+        question = st.text_input("💡 에이전트에게 지시할 분석 질문을 자유롭게 입력하세요:", value=auto_assistant_q)
 
     render_related_links_box(target_df)
 
     btn_c1, btn_c2 = st.columns([3, 1])
     with btn_c1:
-        # 버튼에 RAG 연동 상태 표시
         btn_label = "🚀 에이전트 정밀 분석 실행 (선택 모델 동시 병렬 실행)"
         if rag_knowledge_text:
-            btn_label = "🚀 에이전트 정밀 분석 실행 (사내 규정 RAG 연동 완료)"
+            btn_label = "🚀 에이전트 정밀 분석 실행 (📚 사내 규정 RAG 지식 주입됨)"
         run_clicked = st.button(btn_label, type="primary", use_container_width=True)
     with btn_c2:
         if st.button("🔄 파일·입력 전체 초기화", key="reset_btn_bottom", use_container_width=True):
@@ -1187,7 +1109,6 @@ def render_agent_analysis_section(
             status_box = st.status("⚡ 선택한 AI 모델(정밀 모드)들을 동시에 병렬 실행하고 있습니다...", expanded=True)
 
             def _run_single_model(m_code: str):
-                # graph.py를 통하는 방식이라 일단 데이터 요약(data_summary)에 RAG 지식을 통째로 붙여서 넘깁니다.
                 enhanced_data_info = data_info
                 if rag_knowledge_text:
                     enhanced_data_info += f"\n\n[사내 규정 및 참고 지식 (RAG)]\n{rag_knowledge_text}"
@@ -1240,6 +1161,7 @@ def render_agent_analysis_section(
 
             st.session_state["saved_results"] = new_results
             st.session_state["last_analyzed_df"] = target_df
+            st.session_state["last_summary_df"] = summary_df
             st.session_state["last_aux_sheets"] = aux_sheets
             st.session_state["pipeline_logs"] = logs
             st.rerun()
@@ -1248,6 +1170,7 @@ def render_agent_analysis_section(
     if saved:
         display_models = [m for m in selected_models if m in saved] or list(saved.keys())
         popup_df = st.session_state.get("last_analyzed_df") if st.session_state.get("last_analyzed_df") is not None else target_df
+        popup_summary_df = st.session_state.get("last_summary_df") if st.session_state.get("last_summary_df") is not None else summary_df
         saved_aux = st.session_state.get("last_aux_sheets", aux_sheets)
         live_verdict = evaluate_threshold_verdict(popup_df, threshold=defect_threshold)
 
@@ -1261,7 +1184,12 @@ def render_agent_analysis_section(
                 "소요 시간": f"{r_item['elapsed_time']} 초",
                 f"자동 판정 요약 (기준 {defect_threshold}%)": live_verdict,
             })
-        st.dataframe(pd.DataFrame(matrix_rows), use_container_width=True, hide_index=True)
+
+        # [수정] 모델 비교표 색상 에메랄드 그린 적용
+        def color_models_green(val):
+            return "color: #059669; font-weight: bold;" if isinstance(val, str) and ("Groq" in val or "Ollama" in val or "Gemini" in val) else ""
+
+        st.dataframe(pd.DataFrame(matrix_rows).style.map(color_models_green), use_container_width=True, hide_index=True)
 
         combined_excel_bytes = export_combined_analysis_to_excel(
             popup_df, saved, MODEL_LABELS, aux_sheets=saved_aux, threshold=defect_threshold
@@ -1270,12 +1198,12 @@ def render_agent_analysis_section(
             popup_df, saved, MODEL_LABELS, threshold=defect_threshold
         )
 
-        top_c1, top_c2, top_c3 = st.columns([1.6, 1.2, 1.2])
+        top_c1, top_c2, top_c3 = st.columns([1.4, 1.3, 1.3])
         with top_c1:
-            st.caption("👆 **우측 워드(.docx) 추출 시 [1페이지: 전체 종합 요약표] + [2페이지~: AI별 강제 쪽 나누기 상세본(빈 페이지 0건)]으로 출력됩니다.**")
+            st.caption("👆 **[종합 추출] 선택된 모든 모델의 결과를 하나의 엑셀 / 워드(쪽 나누기 적용) 파일로 한 번에 다운로드합니다.**")
         with top_c2:
             st.download_button(
-                label="📚 전체 모델 종합 비교 엑셀 추출 (.xlsx)",
+                label="📚 전체 모델 비교 마스터 엑셀 다운로드 (.xlsx)",
                 data=combined_excel_bytes,
                 file_name="report_ALL_models_combined.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -1285,7 +1213,7 @@ def render_agent_analysis_section(
             )
         with top_c3:
             st.download_button(
-                label="📄 전체 모델 종합 워드 추출 (쪽나누기 적용 .docx)",
+                label="📄 전체 모델 종합 워드 다운로드 (.docx)",
                 data=combined_docx_bytes,
                 file_name="report_ALL_models_combined.docx",
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -1315,7 +1243,7 @@ def render_agent_analysis_section(
                 dl_b1, dl_b2 = st.columns(2)
                 with dl_b1:
                     live_single_xlsx = export_analysis_to_excel(
-                        popup_df, summary_df, updated_report, res_item["elapsed_time"], m_code,
+                        popup_df, popup_summary_df, updated_report, res_item["elapsed_time"], m_code,
                         aux_sheets=saved_aux, threshold=defect_threshold, analyzed_at=res_item.get("analyzed_at"),
                     )
                     st.download_button(
@@ -1441,7 +1369,6 @@ def render_advanced_extensions_hub(
                 f"[대표 항목 참고용 요약 샘플]\n{compact_sample_str}"
             )
 
-            # RAG 데이터도 반복 검증에 동일하게 적용
             if rag_knowledge_text:
                 data_info_bench += f"\n\n[사내 규정 및 참고 지식 (RAG)]\n{rag_knowledge_text}"
 
@@ -1774,7 +1701,6 @@ with st.sidebar:
 
     st.divider()
 
-    # [RAG 지식 연동 UI 추가]
     st.subheader("📚 사내 지식 문서 (RAG) 연동")
     rag_files = st.file_uploader(
         "리포트 작성 시 참고할 사내 규정서, 과거 회의록(Word .docx, TXT)을 올려주세요.",
@@ -1791,6 +1717,14 @@ with st.sidebar:
     st.divider()
     ollama_models = get_installed_ollama_models()
     with st.expander("🖥️ 로컬 Ollama 상세 설정 & 모델 안내 (클릭)", expanded=False):
+        st.markdown(
+            "**왜 로컬 모델(Ollama)을 쓰나요?**\n"
+            "- 사내 기밀 데이터 외부 유출 0% (완전 오프라인 구동)\n"
+            "- API 비용 0원, 무제한 사용 가능\n\n"
+            "**모델별 특징:**\n"
+            "- `7B / 8B`: 데이터 분석 및 리포트 작성 품질이 가장 우수한 표준 모델\n"
+            "- `3B / 4B`: 사양 낮은 PC에서 빠른 속도를 원할 때 쓰는 경량 모델"
+        )
         chosen_ollama = st.selectbox("구동할 로컬 모델 변경", options=ollama_models, index=0)
         os.environ["LOCAL_MODEL_NAME"] = chosen_ollama
 
@@ -1833,7 +1767,7 @@ else:
     with tab_nl:
         st.caption(
             f"테이블(`{TABLE_NAME}`) 컬럼: `{list(raw_df.columns)}` | "
-            "💡 입력 예시: **`전체조회`**, **`Procedure 미기입`**, **`Expected Result 미기입`**, **`배달`**, **`상위 30건`**"
+            "💡 입력 예시: **`A라인과 B라인 조회해줘`**, **`Procedure 미기입`**, **`상위 30건`**"
         )
         nl_question = st.text_input("조회 조건을 자연어로 입력하세요 (비워두면 제한 없이 전체 데이터를 조회합니다):", value="", key="nl_q_input")
         auto_sql = build_smart_sql(nl_question, raw_df, TABLE_NAME)
