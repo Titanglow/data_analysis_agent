@@ -31,33 +31,19 @@ def get_installed_ollama_models() -> list[str]:
 
 
 def _get_active_groq_models(api_key: str) -> list[str]:
-    """Groq 서버에서 안정적인 텍스트 모델 목록을 조회합니다."""
+    """
+    Groq 서버에서 모델 목록을 조회하되, 불안정한 모델로 넘어가지 않도록
+    가장 성능이 좋고 토큰 한도가 넉넉한 Llama3 계열로만 강제 고정합니다.
+    """
     preferred = [
         "llama-3.3-70b-versatile",
         "llama-3.1-8b-instant",
+        "llama3-70b-8192",
     ]
-    try:
-        req = urllib.request.Request(
-            "https://api.groq.com/openai/v1/models",
-            headers={"Authorization": f"Bearer {api_key}", "User-Agent": "Mozilla/5.0"},
-        )
-        with urllib.request.urlopen(req, timeout=3.0) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            avail = [
-                m["id"]
-                for m in data.get("data", [])
-                if "id" in m and not any(w in m["id"].lower() for w in ["whisper", "tts", "guard", "vision", "audio", "canopylabs", "tool-use", "llama-guard"])
-            ]
-            ordered = [m for m in preferred if m in avail]
-            for m in avail:
-                if m not in ordered:
-                    ordered.append(m)
-            return ordered if ordered else preferred
-    except Exception:
-        return preferred
+    # 이전처럼 avail 목록의 다른 엉뚱한 모델(gpt-oss 등)을 append 하지 않고 오직 preferred만 반환합니다.
+    return preferred
 
 
-# [RAG 추가] knowledge_context 파라미터를 추가로 받습니다.
 def call_llm(prompt: str, mode: str = "local_ollama", knowledge_context: str = "") -> tuple[str, float]:
     """선택된 모드로 LLM을 호출하고 (응답 텍스트, 소요 시간 초)를 반환합니다."""
     load_dotenv(dotenv_path=ENV_PATH, override=True)
@@ -67,12 +53,11 @@ def call_llm(prompt: str, mode: str = "local_ollama", knowledge_context: str = "
         time.sleep(0.15)
         return "테스트 응답입니다.", round(time.perf_counter() - t0, 2)
 
-    # [RAG 핵심] 시스템 프롬프트에 사내 지식 문서를 강제 주입합니다.
-    sys_prompt = "당신은 사내 데이터 분석 수석 전문가입니다. 원본 샘플 행 데이터를 통째로 나열하지 말고, 요청된 질문에 대해 간결하고 명확하게 답변하십시오."
+    sys_prompt = "당신은 사내 데이터 분석 수석 전문가입니다. 원본 샘플 행 데이터를 통째로 나열하지 말고, 1~4번 목차(전체 요약, 시나리오 분포, 리스크 진단, 조치 제안)에 맞춰 간결하고 명확하게 답변하십시오."
     if knowledge_context:
         sys_prompt += (
             "\n\n[사내 규정 및 참고 지식 (RAG)]\n"
-            "아래 제공된 사내 지식 문서를 반드시 참고하여 조치 제안이나 원인을 작성하십시오.\n"
+            "아래 제공된 사내 지식 문서를 반드시 참고하여 [4번. 실무 조치 제안]을 작성할 때 규정을 인용하십시오.\n"
             f"{knowledge_context}"
         )
 
@@ -86,10 +71,10 @@ def call_llm(prompt: str, mode: str = "local_ollama", knowledge_context: str = "
             candidates = _get_active_groq_models(api_key)
             last_err = None
 
-            # 토큰 방어선
+            # 토큰 방어선 (약 10,000자로 강제 컷팅)
             safe_prompt = prompt if len(prompt) < 10000 else prompt[:10000] + "\n\n...[데이터 생략]"
 
-            for m_name in candidates[:3]:
+            for m_name in candidates:
                 try:
                     resp = client.chat.completions.create(
                         model=m_name,
@@ -98,7 +83,8 @@ def call_llm(prompt: str, mode: str = "local_ollama", knowledge_context: str = "
                             {"role": "user", "content": safe_prompt},
                         ],
                         temperature=0.2,
-                        max_tokens=900,
+                        # 리포트 중간 끊김 방지를 위해 900 -> 1200 토큰으로 상향 (OTPM 429 에러 한계선 이내)
+                        max_tokens=1200,
                     )
                     txt = resp.choices[0].message.content or ""
                     if txt.strip():
@@ -107,9 +93,8 @@ def call_llm(prompt: str, mode: str = "local_ollama", knowledge_context: str = "
                 except Exception as e:
                     last_err = e
                     if any(err_code in str(e) for err_code in ["413", "429"]):
-                        return f"⚠️ Groq 토큰 한도 초과: 검색 조건을 좁혀주세요.\n({last_err})", round(time.perf_counter() - t0, 2)
-                    continue
-            return f"⚠️ Groq API 호출 오류: {last_err}", round(time.perf_counter() - t0, 2)
+                        continue  # 토큰 초과 시 다음 후보(Llama 8b 등)로 조용히 넘김
+            return f"⚠️ Groq 무료 API 토큰 한도 초과: 검색 조건을 좁히거나 1분 뒤에 다시 시도해 주세요.\n({last_err})", round(time.perf_counter() - t0, 2)
         except Exception as e:
             return f"⚠️ Groq 초기화 오류: {e}", round(time.perf_counter() - t0, 2)
 
@@ -136,8 +121,6 @@ def call_llm(prompt: str, mode: str = "local_ollama", knowledge_context: str = "
                 candidates = preferred_gemini
 
             last_err = None
-
-            # Gemini 프롬프트 병합
             gemini_prompt = f"{sys_prompt}\n\n[사용자 요청]\n{prompt}"
 
             for m_name in candidates[:4]:
@@ -149,6 +132,9 @@ def call_llm(prompt: str, mode: str = "local_ollama", knowledge_context: str = "
                         return header + txt.strip(), round(time.perf_counter() - t0, 2)
                 except Exception as e:
                     last_err = e
+                    # 구글 서버 503 과부하 에러 시 친절한 안내 메시지로 변경
+                    if "503" in str(e) or "UNAVAILABLE" in str(e):
+                        return f"⚠️ Google Gemini 서버가 현재 일시적으로 혼잡합니다 (503 에러). 잠시 후 다시 시도해 주세요.", round(time.perf_counter() - t0, 2)
                     continue
             return f"⚠️ Gemini API 호출 오류: {last_err}", round(time.perf_counter() - t0, 2)
         except Exception as e:
