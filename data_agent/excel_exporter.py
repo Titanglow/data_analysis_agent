@@ -258,7 +258,14 @@ def build_korean_stat_tables(df: pd.DataFrame, aux_sheets: dict[str, pd.DataFram
         color_cnt = int(series_str.str.contains("배경|빨강|초록|노랑|주황|파랑", regex=True).sum())
 
         valid_vals = series_str[~series_str.isin(["-", "", "None", "nan"])]
-        top_val = valid_vals.mode().iloc[0] if not valid_vals.empty else "-"
+
+        # [에러수정 1] IndexError 방어: 유효한 값이 하나도 없을 때 에러가 나지 않도록 방어 코드 추가
+        if not valid_vals.empty:
+            mode_vals = valid_vals.mode()
+            top_val = mode_vals.iloc[0] if not mode_vals.empty else "-"
+        else:
+            top_val = "-"
+
         if len(str(top_val)) > 32:
             top_val = str(top_val)[:32] + "..."
 
@@ -292,7 +299,9 @@ def build_korean_stat_tables(df: pd.DataFrame, aux_sheets: dict[str, pd.DataFram
            and c != title_col
     ]
     for c_col in cat_candidates[:3]:
-        clean_s = df[c_col].astype(str).apply(lambda x: re.sub(r"\s*\[[^\]]+\]", "", x).strip())
+        # [에러수정 2] TypeError 방어: apply 안의 함수가 무조건 문자열(str)만 받도록 이중 안전장치(str(x)) 추가
+        clean_s = df[c_col].astype(str).apply(lambda x: re.sub(r"\s*\[[^\]]+\]", "", str(x)).strip())
+
         if clean_s.nunique() > 12 and len(df) >= 10:
             grp_df = cluster_text_series_by_topic(clean_s, max_groups=8)
             if len(grp_df) > 0:
