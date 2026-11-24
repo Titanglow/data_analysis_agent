@@ -543,8 +543,8 @@ def _filter_within_target_df(user_q: str, target_df: pd.DataFrame) -> pd.DataFra
 
     tc_ids = re.findall(r"(?:TC|RTC)[\-_]?\d+", user_q, flags=re.IGNORECASE)
     if tc_ids:
-        # [에러 해결] 문자 강제 변환(apply)을 적용하여 float 타입 오류 차단
-        row_text = target_df.apply(lambda row: " ".join(row.astype(str)), axis=1)
+        # [에러 해결] 순수 파이썬 내장 str() 함수를 사용해 float 에러(누수) 원천 차단
+        row_text = target_df.apply(lambda row: " ".join(str(val) for val in row), axis=1)
         mask = pd.Series(False, index=target_df.index)
         for tid in tc_ids:
             mask |= row_text.str.contains(re.escape(tid), case=False, na=False)
@@ -569,8 +569,8 @@ def _filter_within_target_df(user_q: str, target_df: pd.DataFrame) -> pd.DataFra
     if not kws:
         return pd.DataFrame()
 
-    # [에러 해결] 문자 강제 변환(apply)을 적용하여 float 타입 오류 차단
-    row_text = target_df.apply(lambda row: " ".join(row.astype(str)), axis=1)
+    # [에러 해결] 순수 파이썬 내장 str() 함수를 사용해 float 에러(누수) 원천 차단
+    row_text = target_df.apply(lambda row: " ".join(str(val) for val in row), axis=1)
     mask = pd.Series(False, index=target_df.index)
     for kw in list(dict.fromkeys(kws))[:3]:
         mask |= row_text.str.contains(re.escape(kw), case=False, na=False)
