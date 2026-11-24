@@ -290,10 +290,6 @@ def _detect_mentioned_columns(query_str: str, df_columns: list) -> list:
 
 
 def build_smart_sql(nl_query: str, df: pd.DataFrame, table_name: str) -> str:
-    """
-    자연어를 SQL로 변환하는 함수.
-    [수정] 동일한 열(예: 라인)에 대한 여러 검색어(A라인, B라인)가 들어오면 무조건 OR로 묶도록 로직 수정.
-    """
     if not nl_query or not nl_query.strip():
         return f"SELECT * FROM {table_name};"
 
@@ -335,6 +331,14 @@ def build_smart_sql(nl_query: str, df: pd.DataFrame, table_name: str) -> str:
         sql = f"SELECT * FROM {table_name}{order_clause}"
         return f"{sql} LIMIT {limit_val};" if limit_val else f"{sql};"
 
+    if any(k in q_without_limit for k in ["빨강", "빨간", "초록", "노랑", "배경", "색상", "색깔"]):
+        color_kw = "빨강" if ("빨강" in q_without_limit or "빨간" in q_without_limit) else (
+            "초록" if "초록" in q_without_limit else ("노랑" if "노랑" in q_without_limit else "강조")
+        )
+        or_likes = [f'"{col}" LIKE \'%{color_kw}%\'' for col in df.columns]
+        sql = f"SELECT * FROM {table_name} WHERE (" + " OR ".join(or_likes) + f"){order_clause}"
+        return f"{sql} LIMIT {limit_val};" if limit_val else f"{sql};"
+
     if any(k in q_without_limit.lower() for k in ["미기입", "미기재", "빈칸", "공란", "누락", "미실행", "not run", "n/a"]):
         mentioned_cols = _detect_mentioned_columns(q_without_limit, list(df.columns))
         check_cols = mentioned_cols if mentioned_cols else [
@@ -365,7 +369,6 @@ def build_smart_sql(nl_query: str, df: pd.DataFrame, table_name: str) -> str:
             col_matches[col] = list(dict.fromkeys(matched_vals))
 
     where_clauses = []
-    # [수정] 같은 컬럼 내 여러 매칭값이 있으면 무조건 OR 조건으로 묶음
     for col, vals in col_matches.items():
         if is_negation:
             and_not = " AND ".join(f'"{col}" NOT LIKE \'%{v}%\'' for v in vals)
@@ -398,7 +401,6 @@ def build_smart_sql(nl_query: str, df: pd.DataFrame, table_name: str) -> str:
 
     sql = f"SELECT * FROM {table_name}"
     if where_clauses:
-        # 컬럼 간 결합은 AND 처리 (A라인 '이면서' 불량수 20 이상)
         sql += " WHERE " + " AND ".join(where_clauses)
     sql += order_clause
     if limit_val is not None:
@@ -413,7 +415,6 @@ def generate_smart_assistant_question(
         user_filter_text: str,
         threshold: float = DEFAULT_DEFECT_THRESHOLD,
 ) -> str:
-    """[수정] 1번 창에서 자연어로 검색한 조건(user_filter_text)을 AI 비서의 질문 문장에 명확하게 융합합니다."""
     scope_title = ""
     if user_filter_text and user_filter_text.strip():
         scope_title = f"검색 조건 [{user_filter_text.strip()}] (총 {len(target_df):,}건)"
@@ -542,7 +543,8 @@ def _filter_within_target_df(user_q: str, target_df: pd.DataFrame) -> pd.DataFra
 
     tc_ids = re.findall(r"(?:TC|RTC)[\-_]?\d+", user_q, flags=re.IGNORECASE)
     if tc_ids:
-        row_text = target_df.astype(str).agg(" ".join, axis=1)
+        # [에러 해결] 문자 강제 변환(apply)을 적용하여 float 타입 오류 차단
+        row_text = target_df.apply(lambda row: " ".join(row.astype(str)), axis=1)
         mask = pd.Series(False, index=target_df.index)
         for tid in tc_ids:
             mask |= row_text.str.contains(re.escape(tid), case=False, na=False)
@@ -567,7 +569,8 @@ def _filter_within_target_df(user_q: str, target_df: pd.DataFrame) -> pd.DataFra
     if not kws:
         return pd.DataFrame()
 
-    row_text = target_df.astype(str).agg(" ".join, axis=1)
+    # [에러 해결] 문자 강제 변환(apply)을 적용하여 float 타입 오류 차단
+    row_text = target_df.apply(lambda row: " ".join(row.astype(str)), axis=1)
     mask = pd.Series(False, index=target_df.index)
     for kw in list(dict.fromkeys(kws))[:3]:
         mask |= row_text.str.contains(re.escape(kw), case=False, na=False)
@@ -1185,7 +1188,6 @@ def render_agent_analysis_section(
                 f"자동 판정 요약 (기준 {defect_threshold}%)": live_verdict,
             })
 
-        # [수정] 모델 비교표 색상 에메랄드 그린 적용
         def color_models_green(val):
             return "color: #059669; font-weight: bold;" if isinstance(val, str) and ("Groq" in val or "Ollama" in val or "Gemini" in val) else ""
 
