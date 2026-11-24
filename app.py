@@ -1520,8 +1520,8 @@ st.title("📊 자연어 기반 사내 데이터 분석 Agent")
 up_col1, up_col2 = st.columns([4, 1])
 with up_col1:
     uploaded_files = st.file_uploader(
-        "📂 사내 데이터 분석용 엑셀/CSV 파일 업로드 (다중 첨부 · 동시 분석 지원)",
-        type=["csv", "xlsx"],
+        "📂 사내 데이터 분석용 파일 업로드 (CSV, Excel, Word .docx, TXT 다중 첨부 지원)",
+        type=["csv", "xlsx", "docx", "txt"],  # <-- 여기에 "docx", "txt" 추가
         accept_multiple_files=True,
         key=f"file_uploader_{st.session_state['uploader_key']}",
     )
