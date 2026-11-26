@@ -4,14 +4,14 @@ data_analysis_agent/
 ├── data_agent/                  # AI 에이전트 핵심 코어 패키지
 │   ├── config.py                # 테마, 사내 기준(1.5%), 모델 라벨 관리
 │   ├── state.py                 # LangGraph 공유 저장소(AgentState) 스키마
-│   ├── llm.py                   # 멀티 LLM 라우터 (413/429 토큰 에러 방지 다이어트 및 모델 고정)
+│   ├── llm.py                   # 멀티 LLM 라우터 (Groq 404 / Gemini 503 서버 과부하 방어, Ollama 10분 Timeout 적용)
 │   ├── graph.py                 # LangGraph 워크플로우
 │   ├── excel_exporter.py        # 전수 TC ID 명단 산출, 마스터 엑셀 및 쪽나누기 워드 생성
 │   ├── nodes/
 │   │   ├── analyzer_node.py     # 파이썬 통계·이상치 고속 추출
 │   │   └── reporter_node.py     # 4단락 무환각 리포트 및 샘플 나열 차단
 │   └── tools/
-│       ├── data_loader.py       # 시트/배경색 추출(Pandas 3.0 호환), SQLite 처리
+│       ├── data_loader.py       # 다중 시트·RGB 배경색 추출, 사내 지식 문서(Word, TXT) RAG 텍스트 추출
 │       └── visualizer.py        # 양식 검증, 4대 KPI, 차트 렌더링
 ├── docs/                        # 문서 보관소
 │   ├── README.md                # 💡 GitHub 대문(루트) 백업본
@@ -19,7 +19,7 @@ data_analysis_agent/
 │   ├── W47_progress.md          # 2주 차 보고서 (플로팅 채팅, 워드 패키징, 토큰 최적화)
 │   ├── 파일간 호출 순서.txt
 │   └── 노드구성도_뷰어.html      # 공유용 인터랙티브 아키텍처 뷰어
-├── app.py                       # 메인 Streamlit 대시보드
+├── app.py                       # 메인 Streamlit 대시보드 (5단계 파이프라인, RAG 업로더, 플로팅 팝업 채팅, 대화 내역 .txt 저장)
 ├── main.py                      # CLI 터미널 실행 진입점
 ├── run.bat                      # 윈도우 배치 파일
 └── .gitignore                   # 보안 파일 제외 규칙
