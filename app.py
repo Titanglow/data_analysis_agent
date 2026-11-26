@@ -683,9 +683,23 @@ def render_chat_messenger_ui(
             label_visibility="collapsed",
         )
     with top_c3:
-        if st.button("🗑️ 대화 비우기", key=f"clear_chat_{key_suffix}", use_container_width=True):
-            st.session_state["chat_history"] = []
-            st.rerun()
+        b_col1, b_col2 = st.columns(2)
+        with b_col1:
+            # 대화 내역이 있을 때만 다운로드 버튼을 생성
+            chat_export_text = "\n\n".join([f"[{'👤 사용자' if m['role'] == 'user' else '🤖 AI 비서'}]\n{m['content']}" for m in st.session_state["chat_history"]])
+            st.download_button(
+                label="💾 대화 저장",
+                data=chat_export_text.encode("utf-8"),
+                file_name=f"chat_history_{datetime.now().strftime('%m%d_%H%M')}.txt",
+                mime="text/plain",
+                key=f"dl_chat_{key_suffix}",
+                use_container_width=True,
+                disabled=not bool(st.session_state["chat_history"])
+            )
+        with b_col2:
+            if st.button("🗑️ 비우기", key=f"clear_chat_{key_suffix}", use_container_width=True):
+                st.session_state["chat_history"] = []
+                st.rerun()
 
     st.caption("⚡ **빠른 질문 칩 (클릭 시 전체 조회 데이터를 전수 검사하여 즉시 답변합니다):**")
     chip_c1, chip_c2, chip_c3, chip_c4 = st.columns(4)
