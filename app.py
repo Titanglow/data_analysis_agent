@@ -49,12 +49,19 @@ from data_agent.tools.visualizer import (
     render_smart_charts,
 )
 
+# 🌙 다크모드/화이트모드 설정을 다루는 함수
 CONFIG_DIR = Path(".streamlit")
 CONFIG_FILE = CONFIG_DIR / "config.toml"
-if not CONFIG_FILE.exists():
+
+
+def _apply_theme_to_toml(is_dark: bool):
     CONFIG_DIR.mkdir(exist_ok=True)
-    # 아래 base = "dark" 옵션을 추가하면 강제 다크모드가 됩니다.
-    CONFIG_FILE.write_text(f'[theme]\nbase = "dark"\nprimaryColor = "{PRIMARY_COLOR}"\n', encoding="utf-8")
+    theme_base = "dark" if is_dark else "light"
+    CONFIG_FILE.write_text(f'[theme]\nbase = "{theme_base}"\nprimaryColor = "{PRIMARY_COLOR}"\n', encoding="utf-8")
+
+
+if not CONFIG_FILE.exists():
+    _apply_theme_to_toml(is_dark=False)
 
 st.set_page_config(page_title="사내 데이터 분석 Agent", layout="wide")
 
@@ -83,8 +90,16 @@ if "chat_popup_minimized" not in st.session_state:
 if "consistency_data" not in st.session_state:
     st.session_state["consistency_data"] = None
 
+# 현재 적용된 테마 읽어오기
+current_theme_is_dark = False
+if CONFIG_FILE.exists() and 'base = "dark"' in CONFIG_FILE.read_text(encoding="utf-8"):
+    current_theme_is_dark = True
+if "ui_dark_mode" not in st.session_state:
+    st.session_state["ui_dark_mode"] = current_theme_is_dark
+
 popup_width_css = "min(920px, 72vw)" if st.session_state.get("chat_popup_wide") else "min(620px, 48vw)"
 
+# CSS 인젝션
 st.markdown(
     f"""
     <style>
@@ -121,7 +136,7 @@ st.markdown(
         max-height: 86vh !important;
         overflow-y: auto !important;
         overflow-x: hidden !important;
-        background-color: #ffffff !important;
+        background-color: {'#1e1e1e' if st.session_state["ui_dark_mode"] else '#ffffff'} !important;
         border: 2.5px solid #059669 !important;
         border-radius: 16px !important;
         box-shadow: 0 20px 50px rgba(0, 0, 0, 0.28) !important;
@@ -212,13 +227,15 @@ def build_pipeline_status_html(
     ]
 
     cards_html = []
+    is_dark = st.session_state["ui_dark_mode"]
+
     for num, title, state_code, desc in steps_cfg:
         if state_code == "done":
-            bg, border, title_col, sub_col, icon = "#ecfdf5", "#10b981", "#065f46", "#047857", "✅"
+            bg, border, title_col, sub_col, icon = ("#064e3b", "#059669", "#34d399", "#a7f3d0", "✅") if is_dark else ("#ecfdf5", "#10b981", "#065f46", "#047857", "✅")
         elif state_code == "running":
-            bg, border, title_col, sub_col, icon = "#eff6ff", "#2563eb", "#1e40af", "#1d4ed8", "🔄"
+            bg, border, title_col, sub_col, icon = ("#1e3a8a", "#2563eb", "#60a5fa", "#bfdbfe", "🔄") if is_dark else ("#eff6ff", "#2563eb", "#1e40af", "#1d4ed8", "🔄")
         else:
-            bg, border, title_col, sub_col, icon = "#f8fafc", "#cbd5e1", "#64748b", "#94a3b8", "⏳"
+            bg, border, title_col, sub_col, icon = ("#1e293b", "#475569", "#94a3b8", "#cbd5e1", "⏳") if is_dark else ("#f8fafc", "#cbd5e1", "#64748b", "#94a3b8", "⏳")
 
         cards_html.append(
             f'<div style="flex:1; min-width:155px; background:{bg}; border:2px solid {border}; '
@@ -228,9 +245,10 @@ def build_pipeline_status_html(
             f'</div>'
         )
 
+    header_col = "#f8fafc" if is_dark else "#1e293b"
     return (
         '<div style="margin: 4px 0 14px 0;">'
-        '<div style="font-size:0.92rem; font-weight:700; color:#1e293b; margin-bottom:8px;">'
+        f'<div style="font-size:0.92rem; font-weight:700; color:{header_col}; margin-bottom:8px;">'
         '⚡ 실시간 파이프라인 가동현황</div>'
         f'<div style="display:flex; gap:10px; flex-wrap:wrap;">{"".join(cards_html)}</div>'
         '</div>'
@@ -544,7 +562,6 @@ def _filter_within_target_df(user_q: str, target_df: pd.DataFrame) -> pd.DataFra
 
     tc_ids = re.findall(r"(?:TC|RTC)[\-_]?\d+", user_q, flags=re.IGNORECASE)
     if tc_ids:
-        # [에러 해결] 순수 파이썬 내장 str() 함수를 사용해 float 에러(누수) 원천 차단
         row_text = target_df.apply(lambda row: " ".join(str(val) for val in row), axis=1)
         mask = pd.Series(False, index=target_df.index)
         for tid in tc_ids:
@@ -570,7 +587,6 @@ def _filter_within_target_df(user_q: str, target_df: pd.DataFrame) -> pd.DataFra
     if not kws:
         return pd.DataFrame()
 
-    # [에러 해결] 순수 파이썬 내장 str() 함수를 사용해 float 에러(누수) 원천 차단
     row_text = target_df.apply(lambda row: " ".join(str(val) for val in row), axis=1)
     mask = pd.Series(False, index=target_df.index)
     for kw in list(dict.fromkeys(kws))[:3]:
@@ -686,10 +702,9 @@ def render_chat_messenger_ui(
     with top_c3:
         b_col1, b_col2 = st.columns(2)
         with b_col1:
-            # 대화 내역이 있을 때만 다운로드 버튼을 생성
             chat_export_text = "\n\n".join([f"[{'👤 사용자' if m['role'] == 'user' else '🤖 AI 비서'}]\n{m['content']}" for m in st.session_state["chat_history"]])
             st.download_button(
-                label="💾 대화 저장",
+                label="💾 저장",
                 data=chat_export_text.encode("utf-8"),
                 file_name=f"chat_history_{datetime.now().strftime('%m%d_%H%M')}.txt",
                 mime="text/plain",
@@ -1152,7 +1167,10 @@ def render_agent_analysis_section(
                 )
                 return m_code, res
 
-            with ThreadPoolExecutor(max_workers=len(selected_models)) as executor:
+            # [핵심 수정]: Ctrl+C 시 스레드 종료 안되는 현상을 막기 위해
+            # 일반 executor 종료 대기를 하지 않고 as_completed로 결과를 받음
+            executor = ThreadPoolExecutor(max_workers=len(selected_models))
+            try:
                 future_map = {executor.submit(_run_single_model, m): m for m in selected_models}
                 done_cnt = 0
                 for future in as_completed(future_map):
@@ -1172,6 +1190,8 @@ def render_agent_analysis_section(
                         ),
                         unsafe_allow_html=True,
                     )
+            finally:
+                executor.shutdown(wait=False, cancel_futures=True)
 
             logs.append(f"**[4단계 완료]** 사내 기준(`{defect_threshold}%`) 자동 판정 배너 적용 및 샘플 나열 방지 정제 완료")
             logs.append("**[5단계 완료]** 통합 엑셀(`.xlsx`) 및 페이지 분리형 워드(`.docx`) 보고서 패키징 완료")
@@ -1535,8 +1555,8 @@ st.title("📊 자연어 기반 사내 데이터 분석 Agent")
 up_col1, up_col2 = st.columns([4, 1])
 with up_col1:
     uploaded_files = st.file_uploader(
-        "📂 사내 데이터 분석용 파일 업로드 (CSV, Excel, Word .docx, TXT 다중 첨부 지원)",
-        type=["csv", "xlsx", "docx", "txt"],  # <-- 여기에 "docx", "txt" 추가
+        "📂 사내 데이터 분석용 엑셀/CSV 파일 업로드 (다중 첨부 · 동시 분석 지원)",
+        type=["csv", "xlsx"],
         accept_multiple_files=True,
         key=f"file_uploader_{st.session_state['uploader_key']}",
     )
@@ -1675,7 +1695,21 @@ if uploaded_files:
         st.session_state["consistency_data"] = None
 
 with st.sidebar:
-    st.header("⚙️ 실행 및 비교 모델 설정")
+    st.header("⚙️ 앱 화면 및 환경 설정")
+
+    # 🌙 다크모드 라디오 위젯
+    theme_sel = st.radio(
+        "화면 테마 변경",
+        options=["☀️ 화이트 모드", "🌙 다크 모드"],
+        index=1 if st.session_state["ui_dark_mode"] else 0,
+        horizontal=True
+    )
+    new_is_dark = theme_sel == "🌙 다크 모드"
+    if new_is_dark != st.session_state["ui_dark_mode"]:
+        st.session_state["ui_dark_mode"] = new_is_dark
+        _apply_theme_to_toml(is_dark=new_is_dark)
+        st.rerun()
+
     if st.button("🔄 업로드 파일 & 전체 입력 초기화", key="sidebar_reset_all", type="primary", use_container_width=True):
         reset_all_inputs_and_files()
         st.rerun()
