@@ -15,8 +15,9 @@ data_analysis_agent/
 │       └── visualizer.py        # 양식 검증, 4대 KPI, 차트 렌더링
 ├── docs/                        # 문서 보관소
 │   ├── README.md                # 💡 GitHub 대문(루트) 백업본
-│   ├── W46_progress.md          # 1주 차 보고서
-│   ├── W47_progress.md          # 2주 차 보고서 (플로팅 채팅, 워드 패키징, 토큰 최적화)
+│   ├── W46_progress.md          # 1주 차 기록서
+│   ├── W47_progress.md          # 2주 차 기록서 (플로팅 채팅, 워드 패키징, 토큰 최적화)
+│   ├── W48_progress.md          # 3주 차 기록서 (플로팅 채팅, 워드 패키징, 토큰 최적화)
 │   ├── 파일간 호출 순서.txt
 │   └── 노드구성도_뷰어.html      # 공유용 인터랙티브 아키텍처 뷰어
 ├── app.py                       # 메인 Streamlit 대시보드 (5단계 파이프라인, RAG 업로더, 플로팅 팝업 채팅, 대화 내역 .txt 저장)
