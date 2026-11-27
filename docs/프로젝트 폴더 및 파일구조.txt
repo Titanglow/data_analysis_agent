@@ -11,7 +11,7 @@ data_analysis_agent/
 │   │   ├── analyzer_node.py     # 파이썬 통계·이상치 고속 추출
 │   │   └── reporter_node.py     # 4단락 무환각 리포트 및 샘플 나열 차단
 │   └── tools/
-│       ├── data_loader.py       # 다중 시트·RGB 배경색 추출, 사내 지식 문서(Word, TXT) RAG 텍스트 추출
+│       ├── data_loader.py       # 다중 시트·RGB 배경색 추출, 사내 지식 문서(Word, TXT) RAG 텍스트 추출 기능 통합
 │       └── visualizer.py        # 양식 검증, 4대 KPI, 차트 렌더링
 ├── docs/                        # 문서 보관소
 │   ├── README.md                # 💡 GitHub 대문(루트) 백업본
@@ -20,7 +20,7 @@ data_analysis_agent/
 │   ├── W48_progress.md          # 3주 차 기록서 (플로팅 채팅, 워드 패키징, 토큰 최적화)
 │   ├── 파일간 호출 순서.txt
 │   └── 노드구성도_뷰어.html      # 공유용 인터랙티브 아키텍처 뷰어
-├── app.py                       # 메인 Streamlit 대시보드 (5단계 파이프라인, RAG 업로더, 플로팅 팝업 채팅, 대화 내역 .txt 저장)
+├── app.py                       # 메인 Streamlit 대시보드 (5단계 파이프라인, RAG 업로더, 플로팅 팝업 채팅, 대화 내역 .txt 저장, 다크모드/화이트모드 UI 스위치)
 ├── main.py                      # CLI 터미널 실행 진입점
 ├── run.bat                      # 윈도우 배치 파일
 └── .gitignore                   # 보안 파일 제외 규칙
