@@ -53,7 +53,8 @@ CONFIG_DIR = Path(".streamlit")
 CONFIG_FILE = CONFIG_DIR / "config.toml"
 if not CONFIG_FILE.exists():
     CONFIG_DIR.mkdir(exist_ok=True)
-    CONFIG_FILE.write_text(f'[theme]\nprimaryColor = "{PRIMARY_COLOR}"\n', encoding="utf-8")
+    # 아래 base = "dark" 옵션을 추가하면 강제 다크모드가 됩니다.
+    CONFIG_FILE.write_text(f'[theme]\nbase = "dark"\nprimaryColor = "{PRIMARY_COLOR}"\n', encoding="utf-8")
 
 st.set_page_config(page_title="사내 데이터 분석 Agent", layout="wide")
 
